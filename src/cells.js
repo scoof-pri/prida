@@ -29,7 +29,14 @@ export function ensureCells(o) {
   if (!o.cells) {
     const g = cellGrid(o);
     o.cells = new Uint8Array(g.cols * g.rows).fill(CELL_HP);
-    o.cellsAlive = g.cols * g.rows;
+    // A window opening has no blocks.
+    if (o.hole)
+      for (let i = 0; i < o.cells.length; i++) {
+        const c = cellCenter(o, i),
+          a = o.hole.alongX ? c.x : c.z;
+        if (a > o.hole.a0 && a < o.hole.a1 && c.y > o.hole.y0 && c.y < o.hole.y1) o.cells[i] = 0;
+      }
+    o.cellsAlive = o.cells.reduce((n, v) => n + (v > 0), 0);
   }
   return o.cells;
 }

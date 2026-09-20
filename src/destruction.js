@@ -96,7 +96,7 @@ export function collapseParts(map, b) {
   return map.obstacles.filter(
     (o) =>
       o.building === b.id &&
-      (o.panel !== undefined || ['lintel', 'roof', 'upper', 'furniture', 'partition', 'stair'].includes(o.part)),
+      (o.panel !== undefined || ['lintel', 'roof', 'upper', 'furniture', 'partition', 'stair', 'glass'].includes(o.part)),
   );
 }
 export function indexPanels(map) {

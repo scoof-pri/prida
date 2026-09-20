@@ -153,6 +153,86 @@ function room(b, k, ctx) {
   return r;
 }
 
+// ---- apartments ----------------------------------------------------------------------------------------
+// Upper floors of homes with storeys and of small shops are flats: a corridor beside the stairs and two flats
+// (north and south), each behind a partition with a doorway. world.js builds the partitions from this plan.
+const FLAT_TYPES = new Set(['duplex', 'townhouse', 'lodge', 'cafe', 'pharmacy', 'bookshop', 'market', 'pavilion']);
+export function apartmentPlan(b) {
+  if (!FLAT_TYPES.has(b.type) || !(b.storeys > 0)) return null;
+  const hw = b.w / 2 - 0.45,
+    hd = b.d / 2 - 0.45,
+    stairX = hw - 3.3,
+    wallX = stairX - 1.4;
+  if (wallX + hw < 4) return null;
+  return {
+    hw,
+    hd,
+    wallX,
+    door: 1.1,
+    doors: [-hd / 2, hd / 2],
+    flats: [
+      { x0: -hw, x1: wallX - 0.1, z0: -hd, z1: -0.1, outer: 'n' },
+      { x0: -hw, x1: wallX - 0.1, z0: 0.1, z1: hd, outer: 's' },
+    ],
+  };
+}
+function furnishFlat(r, f, i) {
+  const out = f.outer === 'n' ? -1 : 1,
+    wallZ = out < 0 ? f.z0 : f.z1,
+    innerZ = out < 0 ? f.z1 : f.z0,
+    rotOut = out < 0 ? 0 : Math.PI,
+    depth = (name) => (DECOR_SIZES[name] || [1, 1, 1])[2] / 2 + 0.03,
+    alongWall = (name, x, opts) => r.at(name, x, wallZ - out * depth(name), rotOut, opts),
+    alongInner = (name, x, opts) => r.at(name, x, innerZ + out * depth(name), rotOut + Math.PI, opts),
+    width = f.x1 - f.x0;
+  // Kitchen run along the outer wall, west end.
+  let x = f.x0 + 0.1;
+  for (const name of ['fridge', 'stove', 'kitchen-sink', 'kitchen-cabinet']) {
+    const w = (DECOR_SIZES[name] || [1])[0];
+    if (x + w > f.x0 + width * 0.55) break;
+    const id = alongWall(name, x + w / 2);
+    if (name === 'kitchen-cabinet') r.on(id, i % 2 ? 'microwave' : 'coffee-machine', 0.92);
+    x += w + 0.02;
+  }
+  // Dining table in the middle of the west half.
+  const mz = (f.z0 + f.z1) / 2;
+  r.dining(f.x0 + width * 0.3, mz, width > 7 ? 'table' : 'table-round');
+  // Living corner: sofa against the inner wall, TV opposite on the outer wall, rug and lamp.
+  const lx = f.x0 + width * 0.72;
+  alongInner(width > 7 ? 'sofa-long' : 'sofa', lx);
+  const tv = alongWall('tv-cabinet', lx);
+  r.on(tv, i % 3 ? 'tv' : 'tv-vintage', 0.66);
+  r.at('rug', lx, mz, 0, { collide: false });
+  r.at('coffee-table', lx, mz + out * 0.1, 0);
+  r.at('floor-lamp', f.x1 - 0.3, innerZ + out * 0.35, 0, { collide: false });
+  // Bed against the west wall.
+  r.at(width > 7 ? 'bed' : 'bed-single', f.x0 + 1.1, mz + out * 0.4, H);
+  r.at('plant', f.x0 + 0.3, innerZ + out * 0.3, 0, { collide: false });
+  // Bathroom corner by the corridor wall: toilet and sink (and a shower where the flat is wide).
+  r.at('toilet', f.x1 - 0.45, wallZ - out * 0.45, rotOut);
+  r.at('sink', f.x1 - 1.15, wallZ - out * 0.26, rotOut);
+  if (width > 7) r.at('shower', f.x1 - 0.6, innerZ + out * 0.6, rotOut + Math.PI);
+}
+// Pictures on the walls and plants in free corners: every room gets a few.
+const PICTURES = [0xc8553d, 0x2d7d9a, 0xe0b04b, 0x5b8c5a, 0x8a5fb1, 0x2f3e46];
+function decorate(r) {
+  const { hw, hd } = r;
+  for (let i = 0; i < 3; i++) {
+    const side = ['w', 'n', 's'][i],
+      span = side === 'w' ? hd : hw,
+      t = (r.rand() - 0.5) * span * 1.4;
+    r.wall(side, 'picture', t, {
+      box: [0.7 + r.rand() * 0.5, 0.5 + r.rand() * 0.3, 0.04],
+      color: PICTURES[Math.floor(r.rand() * PICTURES.length)],
+      y: 1.45,
+      collide: false,
+      hp: 15,
+    });
+  }
+  r.at('plant', r.stairX - 0.35, -hd + 0.35, 0, { collide: false });
+  r.at('plant', -hw + 0.35, hd - 0.35, 0, { collide: false });
+}
+
 // ---- plans -------------------------------------------------------------------------------------------
 const PLANS = {
   home: {
@@ -423,10 +503,14 @@ const PLANS = {
 };
 
 export function furnishBuilding(b, ctx) {
-  const plan = PLANS[PURPOSE[b.type]] || PLANS.home;
+  const plan = PLANS[PURPOSE[b.type]] || PLANS.home,
+    flats = apartmentPlan(b);
   b.purpose = PURPOSE[b.type] || 'home';
+  if (flats) b.flats = true;
   for (let k = 0; k <= (b.storeys || 0); k++) {
     const r = room(b, k, ctx);
-    (k === 0 ? plan.ground : plan.upper)(r);
+    if (k > 0 && flats) flats.flats.forEach((f, i) => furnishFlat(r, f, i + k));
+    else (k === 0 ? plan.ground : plan.upper)(r);
+    decorate(r);
   }
 }

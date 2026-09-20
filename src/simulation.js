@@ -68,7 +68,7 @@ export class Arena {
     this.maxPlayers = this.mode === 'duel' ? 2 : this.mode === 'royale' ? (this.size === 'city' ? 24 : 10) : 64;
     // The safe zone starts around the whole map and closes over 220 s (district) or 400 s (city).
     this.zoneStart = Math.round(140 * (this.map.limit.x / 104));
-    this.royaleTime = this.size === 'city' ? 420 : 240;
+    this.royaleTime = this.size === 'city' ? 480 : 240;
     this.allowCheats = allowCheats;
     this.cheated = false;
     this.zone = { x: 0, z: 0, radius: this.zoneStart };
@@ -144,8 +144,34 @@ export class Arena {
   addCollider(o) {
     this.physicsDirty = true;
     // Small furniture only stops bullets; pre-cut slabs (stairwells) collide cell by cell.
-    if (o.nocollide) return this.colliders.set(o, null);
+    // Window glass stops people (not bullets' sight lines) until it shatters.
+    if (o.nocollide && o.part !== 'glass') return this.colliders.set(o, null);
     if (o.cells) return this.colliders.set(o, this.cellColliders(o));
+    // A wall with a window: four boxes around the opening, so you can climb through once the glass is gone.
+    if (o.hole) {
+      const h = o.hole,
+        ax = h.alongX,
+        lo = ax ? o.x - o.w / 2 : o.z - o.d / 2,
+        hi = ax ? o.x + o.w / 2 : o.z + o.d / 2,
+        bottom = o.y - o.h / 2,
+        top = o.y + o.h / 2,
+        list = [];
+      for (const [a0, a1, y0, y1] of [
+        [lo, hi, bottom, h.y0],
+        [lo, hi, h.y1, top],
+        [lo, h.a0, h.y0, h.y1],
+        [h.a1, hi, h.y0, h.y1],
+      ]) {
+        if (a1 - a0 < 0.01 || y1 - y0 < 0.01) continue;
+        const a = (a0 + a1) / 2,
+          y = (y0 + y1) / 2,
+          desc = ax
+            ? RAPIER.ColliderDesc.cuboid((a1 - a0) / 2, (y1 - y0) / 2, o.d / 2).setTranslation(a, y, o.z)
+            : RAPIER.ColliderDesc.cuboid(o.w / 2, (y1 - y0) / 2, (a1 - a0) / 2).setTranslation(o.x, y, a);
+        list.push(this.world.createCollider(desc));
+      }
+      return this.colliders.set(o, list);
+    }
     const desc = RAPIER.ColliderDesc.cuboid(o.w / 2, o.h / 2, o.d / 2).setTranslation(o.x, o.y, o.z);
     if (o.rot) desc.setRotation({ x: 0, y: Math.sin(o.rot / 2), z: 0, w: Math.cos(o.rot / 2) });
     this.colliders.set(o, this.world.createCollider(desc));
@@ -270,6 +296,8 @@ export class Arena {
     if (o.panel !== undefined) {
       this.destruction.panels.push(o.panel);
       delete this.destruction.cells[o.panel];
+      // Its window pane goes with it.
+      if (o.hole) for (const g of this.map.obstacles.filter((q) => q.windowPanel === o.panel)) this.breakObstacle(g, attacker);
       this.events.push({ ...info, panel: o.panel });
       // A lintel falls as soon as a panel it rests on is gone.
       this.unsupported(o, attacker);

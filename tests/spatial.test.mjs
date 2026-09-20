@@ -24,7 +24,7 @@ test('grid-accelerated rays and wall checks match brute force on random queries'
 });
 test('grid add/remove keeps queries consistent', () => {
   const map = createWorld(5),
-    o = map.obstacles.find((o) => o.part === 'wall' && (o.face === 'east' || o.face === 'west')),
+    o = map.obstacles.find((o) => o.part === 'wall' && !o.hole && (o.face === 'east' || o.face === 'west')),
     // From outside, looking at the wall.
     dir = { x: o.face === 'west' ? 1 : -1, y: 0, z: 0 };
   const origin = { x: o.x - dir.x * 3, y: o.y, z: o.z },

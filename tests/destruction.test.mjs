@@ -180,7 +180,7 @@ test('katana cuts sever wall panels, and enough cuts bring the house down', () =
   a.syncHeld(p);
   const walls = panelsOf(a, b).filter((o) => o.face === 'east' || o.face === 'west');
   const first = walls[0];
-  aimAt(a, p, first, 1.2);
+  aimAt(a, p, first, -0.2); // low: the blade must hit the wall below the window
   place(a, p, first.x + (first.face === 'east' ? 1.4 : -1.4), first.z);
   a.melee(p);
   assert.ok(first.cells, 'the blade cuts into the concrete');
@@ -194,7 +194,7 @@ test('katana cuts sever wall panels, and enough cuts bring the house down', () =
     const g = cellGrid(wall);
     for (let c = 0; c < g.cols; c += 6) {
       const along = -g.span / 2 + (c + 3) * g.cw,
-        point = { x: wall.x + (g.alongX ? along : 0), y: 1.2, z: wall.z + (g.alongX ? 0 : along) };
+        point = { x: wall.x + (g.alongX ? along : 0), y: 0.8, z: wall.z + (g.alongX ? 0 : along) };
       a.hitCells(wall, [...Array(6)].map((_, k) => [cellIndexAt(wall, point) - 3 + k, 999]).filter(([i]) => Math.floor(i / g.cols) === Math.floor(cellIndexAt(wall, point) / g.cols)), p);
       swings++;
     }
@@ -282,5 +282,27 @@ test('an upper storey that loses its walls drops with everything above it, the f
   assert.deepEqual(changed.storeys, [[b.id, k]]);
   const key = (o) => [o.part, o.x.toFixed(3), o.y.toFixed(3), o.z.toFixed(3)].join();
   assert.deepEqual(client.obstacles.map(key).sort(), a.map.obstacles.map(key).sort());
+  a.dispose();
+});
+test('windows: bullets see through the opening, the pane shatters on one hit, then you can climb through', () => {
+  const a = new Arena({ random: () => 0.5 }),
+    glass = a.map.obstacles.find((o) => o.part === 'glass' && !o.storey && a.map.obstacles.find((w) => w.panel === o.windowPanel)?.face === 'east'),
+    wall = a.map.obstacles.find((w) => w.panel === glass.windowPanel),
+    p = a.addPlayer('p', 'P');
+  assert.ok(wall.hole, 'the wall has a window opening');
+  assert.equal(a.colliders.get(wall).length, 4, 'four wall pieces around the opening');
+  assert.ok(a.colliders.get(glass), 'intact glass blocks movement');
+  aimAt(a, p, wall, glass.y);
+  const origin = { x: p.x, y: p.y + EYE_HEIGHT, z: p.z },
+    dir = { x: -1, y: (glass.y - origin.y) / 3, z: 0 },
+    n = Math.hypot(dir.x, dir.y);
+  dir.x /= n;
+  dir.y /= n;
+  assert.equal(castMap(origin, dir, 10, a.map).impact.obstacle, glass, 'the first thing a shot meets is the pane');
+  a.shoot(p);
+  assert.ok(!a.map.obstacles.includes(glass), 'one hit shatters it');
+  assert.equal(a.colliders.get(glass), undefined);
+  assert.ok(a.map.obstacles.includes(wall), 'the wall around it stands');
+  assert.ok(castMap(origin, dir, 10, a.map).distance > 3.3, 'shots now fly into the room');
   a.dispose();
 });

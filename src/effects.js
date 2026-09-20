@@ -294,6 +294,18 @@ export class CombatEffects {
   }
   // Chunks and dust from a broken wall panel, prop or piece of furniture.
   shatter(e) {
+    // Glass: a spray of small bright shards and no dust.
+    if (e.kind === 'glass') {
+      for (let i = 0; i < (this.lite ? 8 : 22); i++)
+        this.addDebris(
+          { x: e.x + rand(-e.w / 2, e.w / 2), y: e.y + rand(-e.h / 2, e.h / 2), z: e.z + rand(-e.d / 2, e.d / 2) },
+          { x: rand(-3, 3), y: rand(-0.5, 3), z: rand(-3, 3) },
+          rand(0.8, 1.6),
+          rand(0.04, 0.11),
+          i % 2 ? 0xcfeefa : 0x9fd6e8,
+        );
+      return;
+    }
     const size = Math.max(e.w, e.h, e.d),
       pieces = Math.min(this.lite ? 6 : 14, 4 + Math.ceil(size * 3));
     for (let i = 0; i < pieces; i++)

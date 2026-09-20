@@ -285,9 +285,31 @@ export class Scenery {
               : detailMaterial('plaster', 0xffffff, { scale: 0.35, strength: 0.5 }),
             { colors: true },
           );
-        const index = bt.add(place(o.x, o.y, o.z, 0, o.w, o.h, o.d), o.color);
-        link(this.byPanel, o.panel, bt, index);
-        this.wallOf.set(o.panel, { batch: bt, index, key, matKey: 'wall:' + key, o });
+        // A panel with a window is four pieces around the opening.
+        const pieces = [];
+        if (o.hole) {
+          const h = o.hole,
+            ax = h.alongX,
+            lo = (ax ? o.x - o.w / 2 : o.z - o.d / 2),
+            hi = (ax ? o.x + o.w / 2 : o.z + o.d / 2),
+            bottom = o.y - o.h / 2,
+            top = o.y + o.h / 2,
+            piece = (a0, a1, y0, y1) => {
+              if (a1 - a0 < 0.01 || y1 - y0 < 0.01) return;
+              const a = (a0 + a1) / 2,
+                y = (y0 + y1) / 2;
+              pieces.push(
+                (ax ? place(a, y, o.z, 0, a1 - a0, y1 - y0, o.d) : place(o.x, y, a, 0, o.w, y1 - y0, a1 - a0)).clone(),
+              );
+            };
+          piece(lo, hi, bottom, h.y0);
+          piece(lo, hi, h.y1, top);
+          piece(lo, h.a0, h.y0, h.y1);
+          piece(h.a1, hi, h.y0, h.y1);
+        } else pieces.push(place(o.x, o.y, o.z, 0, o.w, o.h, o.d));
+        const indices = pieces.map((m) => bt.add(m, o.color));
+        for (const index of indices) link(this.byPanel, o.panel, bt, index);
+        this.wallOf.set(o.panel, { batch: bt, index: indices[0], indices, key, matKey: 'wall:' + key, o });
       } else if (o.part === 'stair') {
         const bt = batch('stair', unitBox, detailMaterial('concrete', 0xffffff, { scale: 0.6, strength: 0.6 }), { colors: true });
         this.stairOf.set(o.prop, o);
@@ -310,12 +332,23 @@ export class Scenery {
     }
     // Windows: frame and glass reach through the wall so both sides show; curtains hang inside.
     const frameB = batch('window-frame', unitBox, new T.MeshStandardMaterial({ color: 0xf1ede2, roughness: 0.6 })),
+      // Clear glass: you see into the rooms (and out of them); it shatters on the first hit.
       glassB = batch(
         'window-glass',
         unitBox,
-        new T.MeshStandardMaterial({ color: 0x6d9bb0, roughness: 0.15, metalness: 0.3, emissive: 0x1a3140 }),
+        new T.MeshStandardMaterial({
+          color: 0xcfeefa,
+          roughness: 0.05,
+          metalness: 0.1,
+          transparent: true,
+          opacity: 0.22,
+          depthWrite: false,
+          emissive: 0x1a3140,
+          emissiveIntensity: 0.25,
+        }),
         { shadow: false },
       ),
+      glassOf = new Map(map.obstacles.filter((o) => o.part === 'glass').map((o) => [o.windowPanel, o.prop])),
       curtainB = batch('curtain', unitBox, detailMaterial('plaster', 0xffffff, { scale: 2, strength: 0.4 }), {
         colors: true,
         shadow: false,
@@ -327,8 +360,21 @@ export class Scenery {
       const parts = [];
       this.windowOf.set(w.panel, { w, parts });
       const linkW = (b, i) => (parts.push({ batch: b, index: i }), link(this.byPanel, w.panel, b, i));
-      linkW(frameB, frameB.add(place(w.x - (alongZ ? w.out * 0.21 : 0), w.y, w.z - (alongZ ? 0 : w.out * 0.21), rot, w.w + 0.18, h + 0.18, 0.45)));
-      linkW(glassB, glassB.add(place(w.x - (alongZ ? w.out * 0.21 : 0), w.y, w.z - (alongZ ? 0 : w.out * 0.21), rot, w.w, h, 0.47)));
+      const cx = w.x - (alongZ ? w.out * 0.21 : 0),
+        cz = w.z - (alongZ ? 0 : w.out * 0.21),
+        bar = (u, v, bw, bh) => place(cx + (alongZ ? 0 : u), w.y + v, cz + (alongZ ? u : 0), rot, bw, bh, 0.47);
+      // Frame: sill, head and two jambs around the opening, plus a mullion.
+      for (const m of [
+        bar(0, -h / 2 - 0.04, w.w + 0.18, 0.1),
+        bar(0, h / 2 + 0.04, w.w + 0.18, 0.1),
+        bar(-w.w / 2 - 0.04, 0, 0.1, h),
+        bar(w.w / 2 + 0.04, 0, 0.1, h),
+        bar(0, 0, 0.05, h),
+      ])
+        linkW(frameB, frameB.add(m));
+      const pane = glassB.add(place(cx, w.y, cz, rot, w.w, h, 0.06));
+      linkW(glassB, pane);
+      if (glassOf.has(w.panel)) link(this.byProp, glassOf.get(w.panel), glassB, pane);
       const color = CURTAINS[(i * 7 + w.panel) % CURTAINS.length],
         inX = alongZ ? -w.out * 0.52 : 0,
         inZ = alongZ ? 0 : -w.out * 0.52;
@@ -429,7 +475,7 @@ export class Scenery {
       need = g.slab ? rects.length : n;
     if (!slot || need > slot.count) {
       if (slot) this.clearCells(o.panel);
-      else wall.batch.hide(wall.index);
+      else for (const i of wall.indices || [wall.index]) wall.batch.hide(i);
       const matKey = wall.matKey;
       if (!this.cellLayers.has(matKey)) this.cellLayers.set(matKey, new CellLayer(this.root, this.batches.get(matKey).material));
       const layer = this.cellLayers.get(matKey),

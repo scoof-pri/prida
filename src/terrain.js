@@ -1,8 +1,30 @@
 // One shared triangle grid drives rendering, Rapier collision and ray/loot heights.
 export const TERRAIN_STEP = 2;
+// Hills are bucketed on a 32 m grid once there are many of them (the big map has hundreds of dunes and mounds).
+function hillsNear(x, z, map) {
+  const hills = map.hills || [];
+  if (hills.length < 24) return hills;
+  let g = map._hillGrid;
+  if (!g || g.count !== hills.length) {
+    g = map._hillGrid = { count: hills.length, cells: new Map() };
+    for (const h of hills) {
+      const c0 = Math.floor((h.x - h.radius) / 32),
+        c1 = Math.floor((h.x + h.radius) / 32),
+        r0 = Math.floor((h.z - h.radius) / 32),
+        r1 = Math.floor((h.z + h.radius) / 32);
+      for (let c = c0; c <= c1; c++)
+        for (let r = r0; r <= r1; r++) {
+          const k = c * 4096 + r;
+          if (!g.cells.has(k)) g.cells.set(k, []);
+          g.cells.get(k).push(h);
+        }
+    }
+  }
+  return g.cells.get(Math.floor(x / 32) * 4096 + Math.floor(z / 32)) || [];
+}
 export function rawHeight(x, z, map) {
   let y = 0;
-  for (const h of map.hills || []) {
+  for (const h of hillsNear(x, z, map)) {
     const r2 = ((x - h.x) ** 2 + (z - h.z) ** 2) / (h.radius * h.radius);
     if (r2 < 1) y += h.height * (1 - r2) ** 2;
   }

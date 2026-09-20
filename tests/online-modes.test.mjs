@@ -24,13 +24,15 @@ function message(ws, predicate, timeout = 8000) {
   });
 }
 
-test('the big city is about eight times the original district and holds every building type', () => {
+test('the big map is about ten times the district, a city core in a ring of biomes, with every building type', () => {
   const d = createWorld(7),
     c = createWorld(7, 'city'),
-    ratio = (c.limit.x * c.limit.z) / (LIMIT.x * LIMIT.z);
-  assert.ok(ratio > 7.3 && ratio < 8.7, `area ratio ${ratio.toFixed(2)}`);
+    ratio = (c.limit.x * c.limit.z) / (d.limit.x * d.limit.z);
+  assert.ok(ratio > 9.5 && ratio < 11.5, `area ratio ${ratio.toFixed(2)}`);
+  for (const t of ['forest', 'desert', 'glade', 'meadow', 'lake']) assert.ok(c.parks.some((p) => p.type === t), t);
+  for (const b of c.buildings) assert.ok(b.x > c.core.x0 && b.x < c.core.x1 && b.z > c.core.z0 && b.z < c.core.z1, 'buildings stay in the city core');
   assert.equal(c.size, 'city');
-  assert.ok(c.buildings.length > d.buildings.length * 5);
+  assert.ok(c.buildings.length > d.buildings.length * 3);
   assert.equal(new Set(c.buildings.map((b) => b.type)).size, 30);
   for (const b of c.buildings) {
     assert.ok(Math.abs(b.x) + b.w / 2 < c.limit.x && Math.abs(b.z) + b.d / 2 < c.limit.z);
@@ -42,7 +44,7 @@ test('city royale seats 24 with a wider, slower zone; duels are 1 v 1 to five wi
   const r = new Arena({ size: 'city', mode: 'royale' });
   for (let i = 0; i < 30; i++) r.addPlayer('p' + i, 'P', i > 0);
   assert.equal(r.players.length, 24);
-  assert.ok(r.zone.radius > 300 && r.time === 420);
+  assert.ok(r.zone.radius > 300 && r.time === 480);
   assert.equal(r.snapshot().size, 'city');
   r.dispose();
   const d = new Arena({ mode: 'duel' }),

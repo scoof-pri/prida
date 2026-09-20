@@ -3,7 +3,7 @@ import { rollChest } from './items.js';
 import { ObstacleGrid, isLowSolid } from './spatial.js';
 import { streets, DECOR_INFO, rotatedSize } from './decor-layout.js';
 import { rawHeight } from './terrain.js';
-import { furnishBuilding, STAIR } from './interiors.js';
+import { furnishBuilding, STAIR, apartmentPlan } from './interiors.js';
 import { cellGrid, cellCenter } from './cells.js';
 export const PANEL_HP = 100;
 // Upper storeys: 3.36 m of wall plus a 0.24 m floor slab.
@@ -42,11 +42,12 @@ function shuffle(a, rand) {
   }
   return a;
 }
-// Map sizes: the district (10 × 7 blocks, 256 × 202 m) and the city for big online royales (24 × 18 blocks,
-// ≈ 5.6× the district). Blocks are 24 × 26 m with 6 m roads between them.
+// Map sizes: the district (10 × 7 blocks, 256 × 202 m) and the big map (32 × 26 blocks, 784 × 696 m, ≈ 10× the
+// district): a city core of 16 × 12 blocks inside a wide ring of wilderness — forest to the west, desert to the
+// east, glades and meadows to the north, lakes, woods and meadows to the south. Blocks are 24 × 26 m with 6 m roads.
 export const MAP_SIZES = {
   district: { cols: 10, rows: 7, parks: 1, biomes: 1 },
-  city: { cols: 24, rows: 18, parks: 7, biomes: 3 },
+  city: { cols: 32, rows: 26, parks: 3, biomes: 0, core: [16, 12] },
 };
 export const mapSize = (size) => (MAP_SIZES[size] ? size : 'district');
 export function createWorld(seed = DEFAULT_SEED, size = 'district') {
@@ -121,6 +122,55 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     };
     plots.push(lot);
     return lot;
+  }
+  // Big map: tile the ring around the city core with large wild lots (up to 4 × 4 blocks).
+  const core = MAP_SIZES[size].core;
+  if (core) {
+    const c0 = (C - core[0]) / 2,
+      r0 = Math.floor((R - core[1]) / 2),
+      c1 = c0 + core[0],
+      r1 = r0 + core[1],
+      inCore = (c, r) => c >= c0 && c < c1 && r >= r0 && r < r1,
+      bands = (n, a, b) => {
+        const cuts = new Set([0, n, a, b]);
+        for (let i = 0; i < n; i += 4) cuts.add(i);
+        const list = [...cuts].sort((x, y) => x - y);
+        return list.slice(0, -1).map((v, i) => [v, list[i + 1]]);
+      };
+    map.core = { x0: X0 + c0 * 24, x1: X0 + c1 * 24, z0: Z0 + r0 * 26, z1: Z0 + r1 * 26 };
+    let north = 0,
+      south = 0;
+    for (const [ca, cb] of bands(C, c0, c1))
+      for (const [ra, rb] of bands(R, r0, r1)) {
+        if (inCore(ca, ra)) continue;
+        const dx = (ca + cb) / 2 - C / 2,
+          dz = (ra + rb) / 2 - R / 2,
+          type =
+            Math.abs(dx) / C > Math.abs(dz) / R
+              ? dx < 0
+                ? 'forest'
+                : 'desert'
+              : dz < 0
+                ? ['glade', 'meadow', 'forest', 'meadow'][north++ % 4]
+                : ['lake', 'forest', 'meadow', 'glade'][south++ % 4],
+          cells = [];
+        for (let c = ca; c < cb; c++) for (let r = ra; r < rb; r++) cells.push(c * R + r);
+        const id = plots.length;
+        for (const n of cells) grid[n] = id;
+        const lot = {
+          id,
+          x: X0 + ((ca + cb) / 2) * 24,
+          z: Z0 + ((ra + rb) / 2) * 26,
+          w: (cb - ca) * 24,
+          d: (rb - ra) * 26,
+          cells,
+          cols: cb - ca,
+          rows: rb - ra,
+          type,
+        };
+        plots.push(lot);
+        parks.push(lot);
+      }
   }
   for (let k = 0; k < PARKS; k++)
     for (const [type, cols, rows] of [
@@ -205,6 +255,18 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
       obstacles.push(o);
       return o;
     };
+    // A window is a real opening in its wall panel, closed by a pane of glass that breaks at the first hit.
+    const glaze = (o, win, storey) => {
+      const alongX = o.w >= o.d,
+        c = alongX ? o.x : o.z,
+        h = 1.15;
+      o.hole = { alongX, a0: c - win.w / 2, a1: c + win.w / 2, y0: win.y - h / 2, y1: win.y + h / 2 };
+      add(o.x, win.y, o.z, alongX ? win.w : 0.06, h, alongX ? 0.06 : win.w, 'glass', 0x9fd6e8, {
+        nocollide: true,
+        windowPanel: o.panel,
+        ...(storey ? { storey } : {}),
+      });
+    };
     // Exterior walls are split into destructible panels (≤ 2.6 m) that carry the storeys above.
     const panel = (x, z, pw, pd, face, structural = true, height = h) =>
       add(x, height / 2, z, pw, height, pd, structural ? 'wall' : 'partition', structural ? b.color : 0xadb7a4, {
@@ -226,8 +288,8 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
           side < 0 ? 'west' : 'east',
         );
         b.panels.push(o.panel);
-        if (k % 2 === (side < 0 ? 0 : 1) || n === 1)
-          map.windows.push({
+        if (k % 2 === (side < 0 ? 0 : 1) || n === 1) {
+          const win = {
             panel: o.panel,
             x: o.x + side * 0.21,
             z: o.z,
@@ -235,7 +297,10 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
             w: Math.min(1.5, (d / n) * 0.62),
             axis: 'z',
             out: side,
-          });
+          };
+          map.windows.push(win);
+          glaze(o, win, 0);
+        }
       }
     }
     for (const fz of [-1, 1]) {
@@ -249,8 +314,8 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
             o = panel(cx, z, wing / n, 0.4, fz < 0 ? 'north' : 'south');
           b.panels.push(o.panel);
           if (k === 0) next.push(o.panel);
-          if (k === n - 1 && wing / n > 1.9)
-            map.windows.push({
+          if (k === n - 1 && wing / n > 1.9) {
+            const win = {
               panel: o.panel,
               x: o.x,
               z: z + fz * 0.21,
@@ -258,7 +323,10 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
               w: Math.min(1.5, (wing / n) * 0.62),
               axis: 'x',
               out: fz,
-            });
+            };
+            map.windows.push(win);
+            glaze(o, win, 0);
+          }
         }
       // The lintel above a doorway rests on the two panels beside it.
       add(b.x, (h + 2.65) / 2, z, b.door, h - 2.65, 0.4, 'lintel', b.color, {
@@ -323,7 +391,7 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
         },
         window = (o, axis, out, span, i) => {
           if (span < 1.5 || (!glazed && i % 2 === (k % 2))) return;
-          map.windows.push({
+          const win = {
             panel: o.panel,
             x: o.x + (axis === 'z' ? out * 0.21 : 0),
             z: o.z + (axis === 'x' ? out * 0.21 : 0),
@@ -331,7 +399,9 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
             w: Math.min(glazed ? 1.8 : 1.5, span * (glazed ? 0.72 : 0.62)),
             axis,
             out,
-          });
+          };
+          map.windows.push(win);
+          glaze(o, win, k);
         };
       for (const side of [-1, 1]) {
         const n = split(d);
@@ -347,6 +417,28 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
           const o = upanel(b.x - inner / 2 + (i + 0.5) * (inner / n), b.z + fz * (d / 2 - 0.2), inner / n, 0.4, fz < 0 ? 'north' : 'south');
           window(o, 'x', fz, inner / n, i);
         }
+      }
+      // Flats: a partition between the corridor and the flats (with a doorway to each) and one between flats.
+      const flats = apartmentPlan(b);
+      if (flats) {
+        const wx = b.x + flats.wallX,
+          part = (x, z, pw, pd) =>
+            add(x, base + (UPPER_WALL - 0.02) / 2, z, pw, UPPER_WALL - 0.02, pd, 'partition', 0xd9d2c3, {
+              panel: map.panels++,
+              face: 'inside',
+              hp: 60,
+              structural: false,
+              storey: k,
+            });
+        let z = b.z - flats.hd - 0.45;
+        for (const dz of [...flats.doors, flats.hd + 0.45]) {
+          const z1 = dz === flats.hd + 0.45 ? b.z + dz : b.z + dz - flats.door / 2;
+          if (z1 - z > 0.2) part(wx, (z + z1) / 2, 0.14, z1 - z);
+          z = b.z + dz + flats.door / 2;
+          if (dz !== flats.hd + 0.45)
+            levelKeepOut.push({ building: b.id, storey: k, x: wx, z: b.z + dz, w: 2.6, d: flats.door + 0.6 });
+        }
+        part((b.x - flats.hw - 0.45 + wx) / 2, b.z, wx - (b.x - flats.hw - 0.45), 0.14);
       }
       slab(base + UPPER_WALL + 0.12, k);
       if (k < b.storeys) stairs(k, base);
@@ -460,7 +552,7 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
       map.cover.push(c);
     }
   // Trees, rocks, crates and park benches can be destroyed too; `prop` ids let clients mirror that.
-  const PROP_HP = { tree: 120, rock: 240, crate: 90, bench: 70, stair: 90, cactus: 80, hay: 110, log: 130 };
+  const PROP_HP = { tree: 120, rock: 240, crate: 90, bench: 70, stair: 90, cactus: 80, hay: 110, log: 130, glass: 1 };
   let propId = 0;
   for (const o of obstacles)
     if (PROP_HP[o.part]) {
@@ -516,6 +608,20 @@ function wild(map, p, rand, addProp) {
   const { hills, trees, rocks, spawns, chests, waters, flora } = map,
     first = !map.lairs.some((l) => l.biome === p.type),
     lair = first && LAIRS[p.type] ? { boss: LAIRS[p.type], biome: p.type, x: p.x, z: p.z } : null;
+  // Lots on the big map are larger than the district's: counts scale with area, rings with size.
+  const base = BIOME_LOTS.find((b) => b[0] === p.type) || [p.type, 2, 2],
+    f = (p.w * p.d) / (base[1] * 24 * base[2] * 26),
+    s = Math.min(p.w / (base[1] * 24), p.d / (base[2] * 26)),
+    n = (k) => Math.round(k * f);
+  // Extra rolling ground on big lots (kept inside the lot: roads stay flat).
+  const mounds = (count, maxR, maxH) => {
+    for (let i = 0; i < count; i++) {
+      const [x, z] = pick(9),
+        room = Math.min(p.w / 2 - 4 - Math.abs(x - p.x), p.d / 2 - 4 - Math.abs(z - p.z)),
+        radius = Math.min(6 + rand() * maxR, room);
+      if (Math.hypot(x - p.x, z - p.z) > 12 * s && radius > 3.5) hills.push({ x, z, radius, height: 0.8 + rand() * maxH });
+    }
+  };
   const inLot = (x, z, m = 5) => Math.abs(x - p.x) < p.w / 2 - m && Math.abs(z - p.z) < p.d / 2 - m;
   const pick = (m = 5) => [p.x + (rand() - 0.5) * (p.w - m * 2), p.z + (rand() - 0.5) * (p.d - m * 2)];
   const taken = [];
@@ -538,11 +644,12 @@ function wild(map, p, rand, addProp) {
   }
   if (p.type === 'forest') {
     hills.push({ x: p.x - 11, z: p.z - 11, radius: 8, height: 1.6 }, { x: p.x + 12, z: p.z + 11, radius: 7.5, height: 1.2 });
-    for (let i = 0; i < 90 && trees.length < 1e5; i++) {
+    if (f > 1.5) mounds(n(1.5), 6, 1.4);
+    for (let i = 0; i < n(90) && trees.length < 1e5; i++) {
       const [x, z] = pick(3);
       if (clear(x, z, 1.8)) tree(x, z, rand() < 0.7 ? 'pine' : 'broad');
     }
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < n(6); i++) {
       const [x, z] = pick(4);
       if (clear(x, z, 2)) {
         const o = addProp(x, z, 3.2, 0.6, 0.6, 'log', 0x6d5a45);
@@ -550,18 +657,19 @@ function wild(map, p, rand, addProp) {
         map.cover.push(o);
       }
     }
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < n(40); i++) {
       const [x, z] = pick(2);
       flora.push({ x, z, kind: rand() < 0.5 ? 'fern' : 'bush', s: 0.7 + rand() * 0.6 });
     }
   }
   if (p.type === 'lake') {
     // A dug basin with an island; the water sits just below ground level, so the shallows can be waded.
-    hills.push({ x: p.x, z: p.z, radius: 19, height: -1.9 }, { x: p.x, z: p.z, radius: 6.5, height: 2.3 });
-    waters.push({ x: p.x, z: p.z, w: 40, d: 42, y: -0.55, lake: true });
-    for (let i = 0; i < 36; i++) {
-      const a = (i / 36) * Math.PI * 2 + rand() * 0.1,
-        r = 20.5 + rand() * 2.5,
+    hills.push({ x: p.x, z: p.z, radius: 19 * s, height: -1.9 }, { x: p.x, z: p.z, radius: 6.5 * s, height: 2.3 });
+    waters.push({ x: p.x, z: p.z, w: 40 * s, d: 42 * s, y: -0.55, lake: true });
+    const ring = Math.round(36 * s);
+    for (let i = 0; i < ring; i++) {
+      const a = (i / ring) * Math.PI * 2 + rand() * 0.1,
+        r = 20.5 * s + rand() * 2.5,
         x = p.x + Math.cos(a) * r,
         z = p.z + Math.sin(a) * r;
       if (!inLot(x, z, 1.5)) continue;
@@ -570,20 +678,20 @@ function wild(map, p, rand, addProp) {
     }
     for (let i = 0; i < 3; i++) {
       const a = rand() * Math.PI * 2;
-      const x = p.x + Math.cos(a) * 19,
-        z = p.z + Math.sin(a) * 19;
+      const x = p.x + Math.cos(a) * 19 * s,
+        z = p.z + Math.sin(a) * 19 * s;
       if (clear(x, z, 1.6)) rock(x, z, 0.8);
     }
   }
   if (p.type === 'desert') {
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < n(5); i++) {
       const [x, z] = pick(9);
       // Dunes stay inside the lot (roads are flat): radius is capped by the distance to the lot edge.
       const room = Math.min(p.w / 2 - 4 - Math.abs(x - p.x), p.d / 2 - 4 - Math.abs(z - p.z)),
         radius = Math.min(6 + rand() * 4, room);
       if (Math.hypot(x - p.x, z - p.z) > 12 && radius > 3.5) hills.push({ x, z, radius, height: 1.2 + rand() * 1.8 });
     }
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < n(16); i++) {
       const [x, z] = pick(3);
       if (!clear(x, z, 2)) continue;
       if (i % 3 === 0) rock(x, z, 1, 0xc08a5c);
@@ -592,25 +700,30 @@ function wild(map, p, rand, addProp) {
         taken.push([x, z, 1.4]);
       }
     }
-    for (let i = 0; i < 18; i++) {
+    for (let i = 0; i < n(18); i++) {
       const [x, z] = pick(2);
       flora.push({ x, z, kind: 'shrub', s: 0.6 + rand() * 0.5 });
     }
   }
   if (p.type === 'glade') {
     // A sunny clearing ringed by trees.
-    for (let i = 0; i < 18; i++) {
-      const a = (i / 18) * Math.PI * 2,
-        r = 10 + rand() * 2.5,
+    const ringTrees = Math.round(18 * s);
+    for (let i = 0; i < ringTrees; i++) {
+      const a = (i / ringTrees) * Math.PI * 2,
+        r = 10 * s + rand() * 2.5,
         x = p.x + Math.cos(a) * r * 0.9,
         z = p.z + Math.sin(a) * r * 1.6;
       if (inLot(x, z, 1.5) && clear(x, z, 1.6)) tree(x, z, i % 3 ? 'broad' : 'pine');
     }
-    for (let i = 0; i < 70; i++) {
+    if (f > 1.5) for (let i = 0; i < n(12); i++) {
+      const [x, z] = pick(3);
+      if (Math.hypot((x - p.x) / 0.9, (z - p.z) / 1.6) > 13 * s && clear(x, z, 1.8)) tree(x, z, rand() < 0.5 ? 'broad' : 'pine');
+    }
+    for (let i = 0; i < n(70); i++) {
       const [x, z] = pick(2);
       flora.push({ x, z, kind: 'flower', s: 0.7 + rand() * 0.6, c: Math.floor(rand() * 4) });
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < n(3); i++) {
       const [x, z] = pick(4);
       if (clear(x, z, 1.5)) {
         addProp(x, z, 0.9, 0.5, 0.9, 'log', 0x7d6650);
@@ -620,7 +733,8 @@ function wild(map, p, rand, addProp) {
   }
   if (p.type === 'meadow') {
     hills.push({ x: p.x - 10, z: p.z, radius: 8, height: 1.1 }, { x: p.x + 12, z: p.z + 1.5, radius: 6.5, height: 0.9 });
-    for (let i = 0; i < 7; i++) {
+    if (f > 1.5) mounds(n(1), 5, 1);
+    for (let i = 0; i < n(7); i++) {
       const [x, z] = pick(4);
       if (clear(x, z, 2.2)) {
         const o = addProp(x, z, 1.5, 1.4, 1.5, 'hay', 0xd8b764);
@@ -628,7 +742,7 @@ function wild(map, p, rand, addProp) {
         map.cover.push(o);
       }
     }
-    for (let i = 0; i < 160; i++) {
+    for (let i = 0; i < n(160); i++) {
       const [x, z] = pick(1.5);
       flora.push({ x, z, kind: rand() < 0.75 ? 'grass' : 'flower', s: 0.7 + rand() * 0.7, c: Math.floor(rand() * 4) });
     }
