@@ -60,8 +60,10 @@ test('server applies a valid loadout, rejects chest-only weapons and keeps loado
     a.ws.send(JSON.stringify({ type: 'start' }));
     const started = await message(a.ws, (m) => m.type === 'state' && m.group?.phase === 'playing');
     const q = started.state.players.find((p) => p.id === a.id);
+    // Each player's own inventory arrives in `self` (others' inventories are not sent).
+    assert.equal(q.slots, undefined);
     assert.deepEqual(
-      q.slots.slice(0, 3).map((s) => s.w),
+      started.self.slots.slice(0, 3).map((s) => s.w),
       [8, 1, 10],
     );
     assert.equal(q.gear, null);

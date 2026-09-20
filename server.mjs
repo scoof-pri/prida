@@ -108,12 +108,36 @@ function newRoom(code, kind, { party = false, queue = false } = {}) {
     clients: new Map(),
   };
 }
-function send(ws, message) {
-  if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 128000) ws.send(JSON.stringify(message));
+// Numbers go out rounded (centimetres, milliradians): positions and angles need no more, and long decimals
+// were most of every packet.
+const PRECISE = new Set(['angle', 'pitch']);
+function compact(key, v) {
+  if (typeof v !== 'number' || Number.isInteger(v)) return v;
+  return PRECISE.has(key) ? Math.round(v * 1000) / 1000 : Math.round(v * 100) / 100;
 }
+function send(ws, message) {
+  // A slow connection skips states instead of queueing them (a queue is what makes ping explode).
+  if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 48000) ws.send(typeof message === 'string' ? message : JSON.stringify(message, compact));
+}
+// States are shared by the room except for each player's own inventory. Chests and destruction lists only go out
+// when they change (and every 2 s as a refresh); clients keep the last copy.
 function broadcast(r) {
-  const message = { type: 'state', state: r.sim.snapshot(), events: r.sim.drainEvents(), group: group(r) };
-  for (const ws of r.clients.values()) send(ws, message);
+  const state = r.sim.snapshot(),
+    tick = (r.netTick = (r.netTick || 0) + 1),
+    refresh = tick % 40 === 0,
+    slots = new Map();
+  for (const key of ['chests', 'destruction']) {
+    const json = JSON.stringify(state[key], compact);
+    if (json === r['last_' + key] && !refresh) delete state[key];
+    else r['last_' + key] = json;
+  }
+  for (const p of state.players) {
+    slots.set(p.id, p.slots);
+    delete p.slots;
+    if (r.phase === 'playing') delete p.loadout; // the lobby shows loadouts
+  }
+  const base = JSON.stringify({ type: 'state', state, events: r.sim.drainEvents(), group: group(r) }, compact).slice(0, -1);
+  for (const [id, ws] of r.clients) send(ws, base + ',"self":' + JSON.stringify({ slots: slots.get(id) || null }, compact) + '}');
 }
 function resetParty(r, start = false) {
   const humans = [...r.clients.keys()].map((id) => r.sim.players.find((p) => p.id === id)).filter(Boolean),

@@ -392,7 +392,13 @@ function connectGroup(create = false, queue = null) {
       }
       if (msg.type === 'state') {
         const previous = group?.phase,
-          previousMatch = group?.match;
+          previousMatch = group?.match,
+          last = state;
+        // Unchanged chests / destruction are left out by the server; keep the copies we have.
+        for (const key of ['chests', 'destruction']) if (!(key in msg.state) && last?.[key]) msg.state[key] = last[key];
+        const mine = msg.self && msg.state.players.find((p) => p.id === id);
+        if (mine) mine.slots = msg.self.slots;
+        for (const p of msg.state.players) p.slots ||= [];
         state = msg.state;
         group = msg.group;
         renderGroup();
