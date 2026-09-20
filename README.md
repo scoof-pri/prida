@@ -65,6 +65,10 @@ Open `http://localhost:8080`. A group on that page automatically uses its own se
 
 For internet play, deploy this project with its Node server to a host supporting long-lived WebSockets. Build command: `npm ci && npm run build`. Start command: `npm start`. The server listens on `PORT` (default 8080), exposes `/health`, and serves `dist/`. `ALLOWED_ORIGINS` optionally accepts a comma-separated list of allowed browser origins. A reverse proxy must support WebSocket upgrades and TLS. A `Dockerfile` is included as an alternative. Configure the resulting public WSS URL in `public/config.json` as `multiplayerUrl`, rebuild, and upload the new client. Room codes are invitation locators, not authenticated accounts.
 
+## Direct play (no lag from the free server)
+
+Private groups play **directly between browsers** by default (“Direct connection” in the group panel): the host's browser runs the match (the same simulation as solo) and friends connect to it over WebRTC data channels. The PRIDA server only introduces the browsers (a few kilobytes via `?signal=CODE`), so its small free CPU is no longer in the game loop. Ping is the direct distance between the players' homes. The host must keep the game tab open and visible; if the host leaves, the match ends. Public STUN servers (Google, Cloudflare) are used, no TURN relay: a few strict networks (some mobile carriers) cannot connect directly — untick “Direct connection” to play through the server instead. Quick Match always uses the server.
+
 ## Free online server (Render)
 
 1. Push this project to a GitHub repository (the source project, not the client ZIP).

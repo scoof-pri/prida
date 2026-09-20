@@ -12,6 +12,7 @@ import { roomCode, newRoomCode, inviteURL, validEndpoint } from './party.js';
 import { RARITIES, GEAR } from './catalog.js';
 import { LOADOUT_CHOICES, sanitizeLoadout, encodeLoadout, weaponStats } from './items.js';
 import { Minimap } from './minimap.js';
+import { hostGroup, joinGroup } from './p2p.js';
 import { BOSSES, RELICS } from './bosses.js';
 import { GRADE_FIELDS, GRADE_PRESETS, DEFAULT_GRADE, sanitizeGrade, startingGrade } from './grading.js';
 // Map colours for parks and wild biomes (inventory map and minimap).
@@ -356,11 +357,24 @@ function connectGroup(create = false, queue = null) {
     url.searchParams.set('operator', profile.equipped.operator);
     url.searchParams.set('finish', profile.equipped.finish);
     url.searchParams.set('loadout', encodeLoadout(profile.loadout));
-    socket = new WebSocket(url);
+    // Private groups play directly between browsers by default (the host's computer runs the match); the server
+    // only introduces them. Quick match always goes through the server.
+    const direct = !queue && $('#directMode').checked && typeof RTCPeerConnection === 'function',
+      params = {
+        name: $('#nickname').value.slice(0, 16) || 'PLAYER',
+        operator: profile.equipped.operator,
+        finish: profile.equipped.finish,
+        loadout: encodeLoadout(profile.loadout),
+      };
+    socket = direct
+      ? create
+        ? hostGroup({ endpoint: url.href, code, kind: $('#partyMode').value, params })
+        : joinGroup({ endpoint: url.href, code, params })
+      : new WebSocket(url);
     const active = socket;
     setConnecting(true);
-    $('#connectionStatus').textContent = 'Connecting…';
-    connectionTimer = setTimeout(() => active.close(), 7000);
+    $('#connectionStatus').textContent = direct ? (create ? 'Opening your group…' : 'Connecting directly to the host…') : 'Connecting…';
+    connectionTimer = setTimeout(() => active.close(), direct ? 20000 : 7000);
     active.onmessage = (e) => {
       if (socket !== active) return;
       lastPacket = performance.now();
@@ -1627,6 +1641,12 @@ if (import.meta.env?.DEV)
     },
     get state() {
       return state;
+    },
+    get socket() {
+      return socket;
+    },
+    get latency() {
+      return latency;
     },
     get view() {
       return view;

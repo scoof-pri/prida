@@ -81,7 +81,7 @@ const server = http.createServer(async (req, res) => {
     res.end('Not found. Run npm run build first.');
   }
 });
-const wss = new WebSocketServer({ server, maxPayload: 2048, perMessageDeflate: false });
+const wss = new WebSocketServer({ server, maxPayload: 8192, perMessageDeflate: false });
 const origins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 function group(r) {
   const spec = MODES[r.kind];
@@ -188,8 +188,9 @@ wss.on('connection', (ws, req) => {
     ws.close(1008, 'Origin not allowed');
     return;
   }
-  const url = new URL(req.url, 'http://localhost'),
-    queueKind = url.searchParams.get('queue'),
+  const url = new URL(req.url, 'http://localhost');
+  if (url.searchParams.get('signal')) return signalling(ws, url);
+  const queueKind = url.searchParams.get('queue'),
     party = url.searchParams.get('party') === '1';
   let key, room;
   if (queueKind) {
@@ -308,6 +309,53 @@ wss.on('connection', (ws, req) => {
     broadcast(room);
   });
 });
+// Direct play: the server only introduces browsers. A host registers its group code; guests with that code are
+// relayed to it until their WebRTC connection is up (offer / answer / network candidates, a few kilobytes).
+const hosts = new Map(); // code -> { ws, guests: Map<gid, ws> }
+function signalling(ws, url) {
+  const code = roomCode(url.searchParams.get('signal')),
+    role = url.searchParams.get('role');
+  if (!code) return ws.close(4004, 'No code');
+  let budget = 200;
+  const allowed = () => --budget >= 0 || (ws.close(1008, 'Too many messages'), false);
+  if (role === 'host') {
+    if (hosts.has(code)) return ws.close(4001, 'Code in use');
+    const entry = { ws, guests: new Map() };
+    hosts.set(code, entry);
+    const refill = setInterval(() => (budget = Math.min(400, budget + 100)), 10000);
+    ws.on('message', (raw) => {
+      if (!allowed()) return;
+      try {
+        const m = JSON.parse(raw.toString()),
+          guest = entry.guests.get(m.to);
+        if (guest?.readyState === WebSocket.OPEN) guest.send(JSON.stringify({ data: m.data }));
+      } catch {}
+    });
+    ws.on('close', () => {
+      clearInterval(refill);
+      if (hosts.get(code) === entry) hosts.delete(code);
+      for (const g of entry.guests.values()) g.close(4004, 'Host left');
+    });
+    return;
+  }
+  const entry = hosts.get(code);
+  if (!entry) return ws.close(4004, 'No such group');
+  if (entry.guests.size >= 12) return ws.close(1013, 'Too many guests joining');
+  const gid = randomUUID();
+  entry.guests.set(gid, ws);
+  ws.send(JSON.stringify({ type: 'joined', gid }));
+  ws.on('message', (raw) => {
+    if (!allowed()) return;
+    try {
+      const m = JSON.parse(raw.toString());
+      if (entry.ws.readyState === WebSocket.OPEN) entry.ws.send(JSON.stringify({ from: gid, data: m.data }));
+    } catch {}
+  });
+  ws.on('close', () => {
+    entry.guests.delete(gid);
+    if (entry.ws.readyState === WebSocket.OPEN) entry.ws.send(JSON.stringify({ type: 'guest-leave', gid }));
+  });
+}
 function scheduleQueue(r) {
   const spec = MODES[r.kind],
     n = r.clients.size;

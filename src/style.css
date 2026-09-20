@@ -76,3 +76,5 @@ body.menu-wide #menu h1,body.menu-wide #menu .eyebrow{display:none}
 .ability-btn{position:fixed;width:46px;height:46px;border-radius:50%;background:#3a2a58dd;border:1px solid #d8b8ff99;font-size:15px;font-weight:bold;user-select:none;touch-action:none}#ability1Btn{right:92px;bottom:272px}#ability2Btn{right:30px;bottom:272px}.ability-btn.cool{opacity:.35}
 body.touch #minimap{width:112px;height:112px;top:62px;right:18px}body.touch #relicHud{display:none!important}body.touch #feed{top:180px!important}
 @media(max-height:520px){#minimap{width:104px;height:104px;top:58px}#feed{top:170px!important}#ability1Btn{right:290px;bottom:150px}#ability2Btn{right:236px;bottom:150px}#bossBar{top:96px}}
+
+.direct-row{display:flex!important;align-items:center;gap:8px;font-size:10px!important;margin:10px 0 4px}.direct-row input{width:auto;display:inline;margin:0}
