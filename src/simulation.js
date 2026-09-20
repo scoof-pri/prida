@@ -53,7 +53,9 @@ export function initPhysics() {
 }
 const clamp = (v, a, b) => Math.min(b, Math.max(a, Number.isFinite(v) ? v : 0));
 export class Arena {
-  constructor({ bots = 0, random = Math.random, seed = DEFAULT_SEED, mode = 'classic', allowCheats = false, size = 'district', bus = false } = {}) {
+  constructor({ bots = 0, random = Math.random, seed = DEFAULT_SEED, mode = 'classic', allowCheats = false, size = 'district', bus = false, botEvery = 1 } = {}) {
+    // Servers think for bots every `botEvery` steps (their last decision is reused in between) to save CPU.
+    this.botEvery = Math.max(1, Math.round(botEvery));
     this.random = random;
     this.map = createWorld(seed, size);
     this.size = this.map.size;
@@ -362,6 +364,7 @@ export class Arena {
         patrol: Math.floor(this.random() * this.map.spawns.length),
         error: 0,
         phase: this.random() * 2,
+        slot: this.players.length,
       },
     };
     // Teams: every human is on their own; bots form squads that never shoot each other.
@@ -878,7 +881,9 @@ export class Arena {
       p.shield = Math.max(0, p.shield - dt);
       p.cooldown = Math.max(0, p.cooldown - dt);
       let i = p.bot
-        ? this.botInput(p, dt)
+        ? this.botEvery > 1 && p.botInput && (this.tick + p.brain.slot) % this.botEvery
+          ? p.botInput
+          : (p.botInput = this.botInput(p, dt * this.botEvery))
         : p.inputAge > 0.3
           ? {
               ...p.input,
@@ -1521,7 +1526,7 @@ export class Arena {
       mode: this.mode,
       ...this.bosses.snapshot(),
       bus: this.bus ? { ...this.bus } : null,
-      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, ...p }) => ({
+      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, ...p }) => ({
         ...p,
         slots: p.slots.map((s) => (s ? { ...s } : null)),
         gear: p.gear ? { ...p.gear } : null,

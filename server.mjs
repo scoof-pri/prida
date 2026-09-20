@@ -45,7 +45,23 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, game: 'PRIDA', rooms: rooms.size }));
+      const m = process.memoryUsage();
+      res.end(
+        JSON.stringify({
+          ok: true,
+          game: 'PRIDA',
+          rooms: rooms.size,
+          players: [...rooms.values()].reduce((n, r) => n + r.clients.size, 0),
+          stepMs: +(stats.stepMs / Math.max(1, stats.steps)).toFixed(2),
+          worstStepMs: +stats.worstStep.toFixed(1),
+          loopLagAvgMs: +stats.lagAvg.toFixed(1),
+          loopLagMaxMs: +stats.lagMax.toFixed(0),
+          heapMB: Math.round(m.heapUsed / 1e6),
+          rssMB: Math.round(m.rss / 1e6),
+          uptimeS: Math.round(process.uptime()),
+        }),
+      );
+      stats.lagMax = stats.worstStep = 0;
       return;
     }
     const file = path.resolve(root, '.' + (pathname === '/' ? '/index.html' : pathname));
@@ -104,7 +120,8 @@ function newRoom(code, kind, { party = false, queue = false } = {}) {
     match: 0,
     startAt: 0,
     waitingSince: Date.now(),
-    sim: new Arena({ seed, mode: spec.mode, size: spec.size }),
+    // The lobby only lists players: a small map is enough (the match builds the real one).
+    sim: new Arena({ seed, mode: spec.mode === 'duel' ? 'duel' : 'classic', size: 'district' }),
     clients: new Map(),
   };
 }
@@ -146,7 +163,9 @@ function resetParty(r, start = false) {
   r.startAt = 0;
   r.endedAt = 0;
   r.waitingSince = Date.now();
-  r.sim = new Arena({ seed: r.seed, mode: spec.mode, size: spec.size, bus: start && spec.mode === 'royale' });
+  r.sim = start
+    ? new Arena({ seed: r.seed, mode: spec.mode, size: spec.size, bus: spec.mode === 'royale', botEvery: 3 })
+    : new Arena({ seed: r.seed, mode: spec.mode === 'duel' ? 'duel' : 'classic', size: 'district' });
   for (const old of humans) {
     const p = r.sim.addPlayer(old.id, old.name);
     p.cosmetics = old.cosmetics;
@@ -222,17 +241,18 @@ wss.on('connection', (ws, req) => {
   send(ws, { type: 'welcome', id, state: room.sim.snapshot(), group: group(room) });
   broadcast(room);
   if (room.queue) scheduleQueue(room);
-  let rate = 0,
+  let rate = 240,
     epoch = Date.now();
   ws.alive = true;
   ws.on('pong', () => (ws.alive = true));
   ws.on('message', (raw) => {
     ws.alive = true;
-    if (Date.now() - epoch > 1000) {
-      rate = 0;
-      epoch = Date.now();
-    }
-    if (++rate > 90) {
+    // Token bucket (≈ 90 messages a second, bursts of 240): after a server hiccup a client's queued inputs
+    // arrive together, and that must not count as flooding.
+    const now = Date.now();
+    rate = Math.min(240, rate + ((now - epoch) / 1000) * 90);
+    epoch = now;
+    if (--rate < 0) {
       ws.close(1008, 'Rate limit');
       return;
     }
@@ -296,21 +316,33 @@ function scheduleQueue(r) {
   else if (n >= 2) r.startAt = Math.min(r.startAt || Infinity, Date.now() + QUEUE_WAIT.more * 1000);
   else r.startAt = r.waitingSince + QUEUE_WAIT.first * 1000;
 }
-// Big-city rooms simulate at 30 Hz (half the work on small servers); everything else at 60 Hz.
-const rateOf = (r) => (MODES[r.kind]?.size === 'city' ? 30 : 60);
+// Rooms simulate at 30 Hz: free hosting gives a tenth of a CPU, and going over it stalls the whole server
+// (that is what turned into second-long pings). States go out at 20 Hz (15 on the big city).
+const stats = { steps: 0, stepMs: 0, worstStep: 0, lagMax: 0, lagAvg: 0, since: Date.now() };
 let last = performance.now(),
   acc = 0,
   ticks = 0;
 setInterval(() => {
-  const now = performance.now();
+  const now = performance.now(),
+    lag = Math.max(0, now - last - 8);
+  stats.lagMax = Math.max(stats.lagMax, lag);
+  stats.lagAvg = stats.lagAvg * 0.99 + lag * 0.01;
   acc += Math.min((now - last) / 1000, 0.1);
   last = now;
   while (acc >= 1 / 60) {
-    for (const r of rooms.values()) if (r.phase === 'playing' && (rateOf(r) === 60 || ticks % 2 === 0)) r.sim.step(rateOf(r) === 60 ? 1 / 60 : 1 / 30);
+    if (ticks % 2 === 0)
+      for (const r of rooms.values())
+        if (r.phase === 'playing') {
+          const t0 = performance.now();
+          r.sim.step(1 / 30);
+          const ms = performance.now() - t0;
+          stats.steps++;
+          stats.stepMs += ms;
+          stats.worstStep = Math.max(stats.worstStep, ms);
+        }
     acc -= 1 / 60;
     ticks++;
-    // 30 states a second (20 on the big city).
-    for (const r of rooms.values()) if (ticks % (rateOf(r) === 60 ? 2 : 3) === 0) broadcast(r);
+    for (const r of rooms.values()) if (ticks % (MODES[r.kind]?.size === 'city' ? 4 : 3) === 0) broadcast(r);
   }
   // Matchmaking: start queue rooms on time; after a match, return everyone to the lobby for the next one.
   for (const r of rooms.values()) {
