@@ -309,7 +309,8 @@ setInterval(() => {
     for (const r of rooms.values()) if (r.phase === 'playing' && (rateOf(r) === 60 || ticks % 2 === 0)) r.sim.step(rateOf(r) === 60 ? 1 / 60 : 1 / 30);
     acc -= 1 / 60;
     ticks++;
-    if (ticks % 3 === 0) for (const r of rooms.values()) broadcast(r);
+    // 30 states a second (20 on the big city).
+    for (const r of rooms.values()) if (ticks % (rateOf(r) === 60 ? 2 : 3) === 0) broadcast(r);
   }
   // Matchmaking: start queue rooms on time; after a match, return everyone to the lobby for the next one.
   for (const r of rooms.values()) {

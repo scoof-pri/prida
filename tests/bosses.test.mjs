@@ -116,3 +116,27 @@ test('battle bus: everyone starts aboard, jumps or is dropped, and lands', () =>
   assert.ok(!p.dropping && p.y < 12, 'landed');
   a.dispose();
 });
+test('lag compensation: an online shooter hits where the target was on their screen', () => {
+  const a = new Arena({ mode: 'classic', random: () => 0.5 }),
+    p = a.addPlayer('p', 'P'),
+    q = a.addPlayer('q', 'Q');
+  for (const b of a.bosses.list) b.hp = 0;
+  a.place(p, 0, -10);
+  a.place(q, 0, 0);
+  p.shield = q.shield = 0;
+  // q runs sideways; p aims at where q was 150 ms ago.
+  for (let i = 0; i < 40; i++) {
+    a.input('q', { x: 1, z: 0 });
+    a.input('p', { lag: 200, angle: 0 });
+    a.step();
+  }
+  const trail = a.trails.get('q'),
+    then = trail[trail.length - 1 - Math.round(0.15 * 60)];
+  p.angle = Math.atan2(then.x - p.x, then.z - p.z);
+  p.pitch = 0;
+  p.lag = 200;
+  const before = q.hp;
+  a.shoot(p);
+  assert.ok(q.hp < before, 'rewound hit lands');
+  a.dispose();
+});

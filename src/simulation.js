@@ -499,22 +499,27 @@ export class Arena {
   input(id, i) {
     const p = this.players.find((p) => p.id === id);
     if (!p || !i || typeof i !== 'object') return;
+    // Several inputs can arrive between two steps online: one-shot presses are kept until a step has seen them.
+    const held = p.inputAge === 0 ? p.input : {},
+      once = (k) => i[k] === true || held[k] === true;
     p.input = {
       x: clamp(i.x, -1, 1),
       z: clamp(i.z, -1, 1),
       angle: clamp(i.angle, -Math.PI * 2, Math.PI * 2),
       pitch: clamp(i.pitch, -1.35, 1.35),
       fire: i.fire === true,
-      reload: i.reload === true,
-      jump: i.jump === true,
+      reload: once('reload'),
+      jump: once('jump'),
       ascend: clamp(i.ascend, -1, 1),
       sprint: i.sprint === true,
       slot: Number.isFinite(i.slot) ? Math.round(clamp(i.slot, 0, 4)) : undefined,
-      interact: i.interact === true,
-      heal: i.heal === true,
+      interact: once('interact'),
+      heal: once('heal'),
       ability1: i.ability1 === true,
       ability2: i.ability2 === true,
     };
+    // Round-trip time the client measured (ms), used to rewind targets for its shots (lag compensation).
+    if (Number.isFinite(i.lag)) p.lag = clamp(i.lag, 0, 400);
     p.inputAge = 0;
   }
   setCheat(id, key, on) {
@@ -1024,6 +1029,15 @@ export class Arena {
       this.physicsDirty = false;
       this.world.step();
     } else this.world.propagateModifiedBodyPositionsToColliders();
+    // Recent positions (≈ 0.4 s) for lag compensation.
+    this.trails ||= new Map();
+    this.stepDt = dt;
+    for (const p of this.players) {
+      let t = this.trails.get(p.id);
+      if (!t) this.trails.set(p.id, (t = []));
+      t.push({ x: p.x, y: p.y, z: p.z, alive: p.hp > 0 });
+      if (t.length > Math.ceil(0.4 / dt)) t.shift();
+    }
     this.stepProjectiles(dt);
     this.bosses.step(dt);
     if (this.navDirty && this.tick % 20 === 0) {
@@ -1177,13 +1191,14 @@ export class Arena {
         victim = null;
       for (const o of this.enemies(p)) {
         if (o.shield > 0) continue;
-        const near = rayBox(
-          origin,
-          dir,
-          { x: o.x - 0.34, y: o.y, z: o.z - 0.34 },
-          { x: o.x + 0.34, y: o.y + 1.9, z: o.z + 0.34 },
-          w.range,
-        );
+        const at = this.seenAt(p, o),
+          near = rayBox(
+            origin,
+            dir,
+            { x: at.x - 0.34, y: at.y, z: at.z - 0.34 },
+            { x: at.x + 0.34, y: at.y + 1.9, z: at.z + 0.34 },
+            w.range,
+          );
         if (near < distance) {
           distance = near;
           victim = o;
@@ -1219,6 +1234,17 @@ export class Arena {
       else if (impact?.obstacle?.panel !== undefined)
         this.chipWall(impact.obstacle, { x: p.x + dir.x * distance, y: origin.y + dir.y * distance, z: p.z + dir.z * distance }, dir, w.damage, p);
     }
+  }
+  // Where the shooter saw a target: online players see others about half a round trip plus one packet late, so
+  // their hitscan shots are checked against positions that far back (capped at 250 ms).
+  seenAt(shooter, o) {
+    if (shooter.bot || !shooter.lag) return o;
+    const trail = this.trails?.get(o.id);
+    if (!trail?.length) return o;
+    const back = Math.round(Math.min(250, shooter.lag / 2 + 50) / 1000 / (this.stepDt || 1 / 60)),
+      k = Math.max(0, trail.length - 1 - back),
+      at = trail[k];
+    return at.alive ? at : o;
   }
   equip(p, slot) {
     if (Number.isInteger(slot) && p.slots[slot] && slot !== p.slot) {

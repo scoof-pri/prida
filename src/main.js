@@ -1214,6 +1214,31 @@ function updateInventoryHUD(p) {
 setInterval(() => {
   if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'ping', sent: performance.now() }));
 }, 2000);
+// Online: your own movement is shown ahead of the server by what you did during the last round trip, so walking
+// responds at once instead of one ping later. The offset fades as the server catches up, and never goes into walls.
+const prediction = { x: 0, z: 0 };
+function predicted(dt) {
+  const me = mode === 'online' && state.players.find((p) => p.id === id);
+  if (!me || me.hp <= 0 || me.inBus || me.frozen > 0 || paused) {
+    prediction.x = prediction.z = 0;
+    return state;
+  }
+  const i = input(),
+    speed = me.dropping ? 13 : me.gliding ? 10 : (i.sprint && me.stamina > 0 ? 9 : 5.8) * (WEAPONS[me.weapon]?.move || 1),
+    rtt = Math.max(0.03, Math.min(0.5, (latency || 60) / 1000)),
+    k = Math.exp(-dt / rtt);
+  prediction.x = (prediction.x + (i.x || 0) * speed * dt) * k;
+  prediction.z = (prediction.z + (i.z || 0) * speed * dt) * k;
+  const len = Math.hypot(prediction.x, prediction.z);
+  if (len > 2.5) (prediction.x *= 2.5 / len), (prediction.z *= 2.5 / len);
+  const to = { x: me.x + prediction.x, z: me.z + prediction.z };
+  if (view.map && !lineClear(me, to, 0.3, view.map.obstacles)) {
+    prediction.x *= 0.5;
+    prediction.z *= 0.5;
+    return state;
+  }
+  return { ...state, players: state.players.map((p) => (p === me ? { ...p, x: to.x, z: to.z } : p)) };
+}
 function frame(t) {
   let dt = Math.min((t - last) / 1000 || 0, 0.1);
   last = t;
@@ -1233,8 +1258,8 @@ function frame(t) {
   } else acc = 0;
   if (mode === 'online') {
     netTimer += dt;
-    if (netTimer >= 0.033 && socket?.readyState === 1) {
-      socket.send(JSON.stringify({ type: 'input', input: input() }));
+    if (netTimer >= 1 / 60 && socket?.readyState === 1) {
+      socket.send(JSON.stringify({ type: 'input', input: { ...input(), lag: latency } }));
       netTimer = 0;
       reload = false;
       jump = false;
@@ -1257,7 +1282,7 @@ function frame(t) {
   previousAlive = alive;
   const spectated = state.mode === 'royale' && player?.hp <= 0 ? state.players.find((p) => p.hp > 0) : null;
   view.update(
-    state,
+    predicted(dt),
     spectated?.id || id,
     mode === 'training' && (paused || inventoryOpen || panel) ? 0 : dt,
     mode === 'menu',
