@@ -1,0 +1,15 @@
+# Render Blueprint: free web service running the PRIDA game server (it also serves the built client).
+# Dashboard → New → Blueprint → pick this repository. The game is then at https://<service>.onrender.com
+services:
+  - type: web
+    name: prida
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PRIDA_MAX_ROOMS
+        value: "6"

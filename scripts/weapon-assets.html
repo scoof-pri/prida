@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+  <body style="margin: 0; background: transparent">
+    <script type="module">
+      // Build-time helper page driven by scripts/build-weapon-assets.mjs (not part of the game bundle).
+      import * as T from 'three';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+      import { PROCEDURAL } from './procedural-models.js';
+
+      const loader = new GLTFLoader();
+      const toBase64 = (buf) => {
+        let s = '';
+        const b = new Uint8Array(buf);
+        for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+        return btoa(s);
+      };
+      async function exportGLB(object) {
+        const buf = await new GLTFExporter().parseAsync(object, { binary: true });
+        return toBase64(buf);
+      }
+      // Weapons carried by the Quaternius characters (toon kit) extracted as standalone models.
+      window.extract = async (pairs) => {
+        const gltf = await loader.loadAsync('/models/soldier.glb'),
+          out = {};
+        for (const [node, name] of pairs) {
+          const n = gltf.scene.getObjectByName(node);
+          if (!n) throw Error('Missing node ' + node);
+          const c = n.clone(true);
+          c.position.set(0, 0, 0);
+          c.quaternion.identity();
+          c.scale.set(1, 1, 1);
+          c.traverse((o) => (o.visible = true));
+          const root = new T.Group();
+          root.name = name;
+          root.add(c);
+          out[name] = await exportGLB(root);
+        }
+        return out;
+      };
+      window.procedural = async (names) => {
+        const out = {};
+        for (const name of names) out[name] = await exportGLB(PROCEDURAL[name]());
+        return out;
+      };
+      // Transparent 192 × 128 icons, side view with the muzzle to the left.
+      window.icons = async (list) => {
+        const W = 192,
+          H = 128,
+          renderer = new T.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+        renderer.setPixelRatio(1);
+        renderer.setSize(W, H);
+        renderer.outputColorSpace = T.SRGBColorSpace;
+        renderer.setClearColor(0x000000, 0);
+        const out = {};
+        for (const { name, rot = [0, 0, 0] } of list) {
+          const g = await loader.loadAsync('/models/' + name + '.glb');
+          const scene = new T.Scene();
+          scene.add(new T.HemisphereLight(0xffffff, 0x5a6668, 2.4));
+          const d = new T.DirectionalLight(0xffffff, 2.3);
+          d.position.set(-2, 5, 6);
+          scene.add(d);
+          const obj = g.scene;
+          obj.rotation.set(...rot);
+          scene.add(obj);
+          obj.updateMatrixWorld(true);
+          const box = new T.Box3().setFromObject(obj),
+            size = box.getSize(new T.Vector3()),
+            c = box.getCenter(new T.Vector3());
+          const cam = new T.OrthographicCamera(-1, 1, 1, -1, 0.01, 100);
+          const span = Math.max(size.x / (W / H), size.y) * 0.58 + 0.001;
+          Object.assign(cam, { left: (-span * W) / H, right: (span * W) / H, top: span, bottom: -span });
+          cam.position.set(c.x + size.x * 0.12, c.y + Math.max(size.x, size.y) * 0.35, c.z + 5);
+          cam.lookAt(c.x, c.y, c.z);
+          cam.updateProjectionMatrix();
+          renderer.render(scene, cam);
+          out[name] = renderer.domElement.toDataURL('image/png').split(',')[1];
+        }
+        return out;
+      };
+      document.title = 'ready';
+    </script>
+  </body>
+</html>

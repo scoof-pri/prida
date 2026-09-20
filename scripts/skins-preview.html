@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head><base href="/" /></head>
+  <body style="margin: 0; background: #7f9f97">
+    <script type="module">
+      // Development page: all operators in every bot uniform tint (not part of the game bundle).
+      import * as T from 'three';
+      import { loadAssets, character } from '/src/assets.js';
+      import { applyUniformTint } from '/src/render.js';
+      await loadAssets();
+      const r = new T.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      r.setSize(960, 360);
+      r.outputColorSpace = T.SRGBColorSpace;
+      document.body.appendChild(r.domElement);
+      const scene = new T.Scene();
+      scene.background = new T.Color(0x9fb9b0);
+      scene.add(new T.HemisphereLight(0xffffff, 0x6f7a70, 2.2));
+      const sun = new T.DirectionalLight(0xffffff, 2.2);
+      sun.position.set(3, 6, 8);
+      scene.add(sun);
+      for (let row = 0; row < 3; row++)
+        for (let t = -1; t < 8; t++) {
+          const a = character(row);
+          applyUniformTint(a.model, t < 0 ? undefined : t);
+          a.model.position.set((t - 3) * 1.1, (1 - row) * 2.2, 0);
+          const idle = a.clips.find((c) => c.name === 'Idle');
+          a.mixer.clipAction(idle).play();
+          a.mixer.update(0.3);
+          scene.add(a.model);
+        }
+      const cam = new T.PerspectiveCamera(32, 960 / 360, 0.1, 100);
+      cam.position.set(0, 0.9, 12);
+      cam.lookAt(0, 0.8, 0);
+      r.render(scene, cam);
+      document.title = 'done';
+    </script>
+  </body>
+</html>
