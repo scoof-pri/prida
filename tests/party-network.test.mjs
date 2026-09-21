@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { appearance, pack } from '../src/cosmetics.js';
 import { once } from 'node:events';
 import WebSocket from 'ws';
 function message(ws, predicate, timeout = 3000) {
@@ -34,7 +35,7 @@ test('party host starts two humans plus eight bots; late joins rejected, disconn
     ]);
     async function join(name, room = 'royale') {
       const ws = new WebSocket(
-        `ws://127.0.0.1:8101?party=1&mode=royale&room=${room}&name=${name}&operator=hazmat&finish=jade`,
+        `ws://127.0.0.1:8101?party=1&mode=royale&room=${room}&name=${name}&cos=${encodeURIComponent(pack({ operator: 'hazmat', finish: 'jade' }))}`,
       );
       clients.push(ws);
       ws.on('error', () => {});
@@ -57,7 +58,9 @@ test('party host starts two humans plus eight bots; late joins rejected, disconn
     assert.equal(match.state.players.filter((p) => p.bot).length, 8);
     assert.equal(match.state.mode, 'royale');
     assert.equal(match.group.match, 1);
-    assert.equal(match.state.players.find((p) => p.id === a.id).cosmetics.finish, 'jade');
+    const look = appearance(match.state.players.find((p) => p.id === a.id).cosmetics);
+    assert.equal(look.finish, 'jade');
+    assert.equal(look.operator, 'hazmat');
     a.ws.send(
       JSON.stringify({
         type: 'input',

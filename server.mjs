@@ -171,6 +171,7 @@ function resetParty(r, start = false) {
     p.cosmetics = old.cosmetics;
     // Loadouts are re-validated by the simulation; chest-only weapons can never be chosen.
     r.sim.setLoadout(p, old.loadout);
+    r.sim.setSkills(p, old.skills);
   }
   if (start) {
     r.match++;
@@ -237,8 +238,9 @@ wss.on('connection', (ws, req) => {
   room.clients.set(id, ws);
   if (!room.host) room.host = id;
   const player = room.sim.addPlayer(id, name);
-  player.cosmetics = appearance({ operator: url.searchParams.get('operator'), finish: url.searchParams.get('finish') });
+  player.cosmetics = appearance(url.searchParams.get('cos') || {});
   room.sim.setLoadout(player, decodeLoadout(url.searchParams.get('loadout')));
+  room.sim.setSkills(player, url.searchParams.get('skills') || '');
   send(ws, { type: 'welcome', id, state: room.sim.snapshot(), group: group(room) });
   broadcast(room);
   if (room.queue) scheduleQueue(room);
@@ -268,6 +270,11 @@ wss.on('connection', (ws, req) => {
       if (m.type === 'loadout' && room.phase === 'lobby') {
         const p = room.sim.players.find((p) => p.id === id);
         if (p) room.sim.setLoadout(p, decodeLoadout(m.value));
+        broadcast(room);
+      }
+      if (m.type === 'skills' && room.phase === 'lobby') {
+        const p = room.sim.players.find((p) => p.id === id);
+        if (p) room.sim.setSkills(p, String(m.value || '').slice(0, 16));
         broadcast(room);
       }
       if (m.type === 'ping') send(ws, { type: 'pong', sent: m.sent });

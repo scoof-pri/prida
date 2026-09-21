@@ -42,6 +42,99 @@ function tintObject(root, color) {
     for (const m of o.userData.tintMaterials) if (m.color) m.color.copy(m.userData.baseColor).multiply(color);
   });
 }
+// Weapon patterns: they repaint the cloned tint materials, so a pattern always sits on top of the colour.
+const PATTERNS = {
+  stripes: { emissive: 0xffd27a, ei: 0.3, alt: 0.35 },
+  carbon: { multiply: 0x6d7a80, metalness: 0.85, roughness: 0.18 },
+  camo: { alt: 0.5, altColor: 0x6f8248 },
+  neon: { emissive: 'finish', ei: 0.6, metalness: 0.4 },
+  tiger: { emissive: 0xffa32e, ei: 0.45, alt: 0.3, altColor: 0x3a2a14 },
+};
+function applyPattern(root, id, finishColor) {
+  const spec = PATTERNS[id];
+  root.traverse((o) => {
+    const list = o.userData?.tintMaterials;
+    if (!list) return;
+    list.forEach((m, i) => {
+      if (m.emissive) {
+        m.emissive.setHex(0x000000);
+        m.emissiveIntensity = 0;
+      }
+      if (!spec) return;
+      // Alternate materials carry the pattern: two-tone bodies, stripes, camo blotches.
+      const alt = (i + (o.id % 2)) % 2 === 1;
+      if (spec.multiply) m.color.multiply(new T.Color(spec.multiply));
+      if (alt && spec.alt) m.color.multiplyScalar(spec.alt);
+      if (alt && spec.altColor) m.color.lerp(new T.Color(spec.altColor), 0.6);
+      if (spec.emissive && m.emissive) {
+        m.emissive.copy(spec.emissive === 'finish' ? finishColor : new T.Color(spec.emissive));
+        m.emissiveIntensity = spec.ei;
+      }
+      if (spec.metalness !== undefined) m.metalness = spec.metalness;
+      if (spec.roughness !== undefined) m.roughness = spec.roughness;
+    });
+  });
+}
+// Weapon charms: a tiny trinket hanging under the grip.
+function charmMesh(id, scale = 1) {
+  const spec = COSMETICS.find((c) => c.id === id);
+  if (!spec || id === 'nocharm') return null;
+  const color = new T.Color(spec.color),
+    mat = new T.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.35, roughness: 0.4, flatShading: true }),
+    geo =
+      id === 'cube'
+        ? new T.BoxGeometry(1, 1, 1)
+        : id === 'skull'
+          ? new T.DodecahedronGeometry(0.62, 0)
+          : id === 'star'
+            ? new T.OctahedronGeometry(0.7, 0)
+            : id === 'bell'
+              ? new T.ConeGeometry(0.6, 1, 6)
+              : new T.TetrahedronGeometry(0.75, 0),
+    group = new T.Group(),
+    mesh = new T.Mesh(geo, mat),
+    cordMat = new T.MeshBasicMaterial({ color: 0x3a3a3a }),
+    cord = new T.Mesh(new T.BoxGeometry(0.12, 1.1, 0.12), cordMat);
+  cord.position.y = 0.55;
+  group.add(cord, mesh);
+  group.scale.setScalar(scale);
+  group.userData.charm = true;
+  return group;
+}
+// Accessories worn on the head.
+function accessoryMesh(id) {
+  const spec = COSMETICS.find((c) => c.id === id);
+  if (!spec || id === 'noaccessory') return null;
+  const color = new T.Color(spec.color),
+    mat = new T.MeshStandardMaterial({ color, roughness: 0.6, flatShading: true }),
+    g = new T.Group();
+  const add = (geo, x, y, z, m = mat) => {
+    const mesh = new T.Mesh(geo, m);
+    mesh.position.set(x, y, z);
+    g.add(mesh);
+    return mesh;
+  };
+  if (id === 'cap') {
+    add(new T.CylinderGeometry(0.19, 0.2, 0.09, 8), 0, 0.12, 0);
+    add(new T.BoxGeometry(0.26, 0.03, 0.2), 0, 0.09, 0.19);
+  } else if (id === 'visor') {
+    const glass = new T.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.7, roughness: 0.2 });
+    add(new T.BoxGeometry(0.34, 0.09, 0.05), 0, 0.03, 0.17, glass);
+  } else if (id === 'antenna') {
+    add(new T.CylinderGeometry(0.012, 0.012, 0.42, 5), 0.08, 0.3, -0.02);
+    const tip = new T.MeshStandardMaterial({ color: 0xff5a4a, emissive: 0xff5a4a, emissiveIntensity: 0.8 });
+    add(new T.SphereGeometry(0.035, 6, 6), 0.08, 0.5, -0.02, tip);
+  } else if (id === 'horns') {
+    for (const s of [-1, 1]) {
+      const horn = add(new T.ConeGeometry(0.06, 0.24, 6), s * 0.13, 0.17, 0);
+      horn.rotation.z = s * -0.5;
+    }
+  } else if (id === 'halo') {
+    const glow = new T.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 });
+    add(new T.TorusGeometry(0.17, 0.02, 6, 20), 0, 0.33, 0, glow).rotation.x = Math.PI / 2;
+  }
+  return g;
+}
 function disposeTint(root) {
   root.traverse((o) => {
     for (const m of o.userData.tintMaterials || []) m.dispose();
@@ -497,6 +590,22 @@ export class View {
       label = this.text(local ? 'YOU' : p.name, 0.8, 0.16, ally ? '#b6f5d6' : '#f7e5be', ally ? '#2f6b55' : '#29464a');
     label.position.y = 2.37;
     root.add(label);
+    // Accessory on the head bone, charm under the grip of every weapon.
+    const head = body.getObjectByName('Head'),
+      accessory = accessoryMesh(look.accessory);
+    if (head && accessory) {
+      accessory.scale.setScalar(1 / body.scale.x);
+      accessory.position.y = 0.06 / body.scale.x;
+      head.add(accessory);
+    }
+    for (const g of guns) {
+      const box = localSize(g),
+        charm = charmMesh(look.charm, Math.max(0.02, box.size.y * 0.35));
+      if (charm) {
+        charm.position.set(box.center.x, box.center.y - box.size.y * 0.55, box.center.z);
+        g.add(charm);
+      }
+    }
     const v = {
       root,
       body,
@@ -514,7 +623,12 @@ export class View {
       previousHP: p.hp,
       hitTime: 0,
       operator: look.operator,
-      tint: p.cosmetics?.tint,
+      tint: look.tint,
+      accessory: look.accessory,
+      charm: look.charm,
+      pattern: look.pattern,
+      effect: look.effect,
+      emoteClock: 0,
       ally,
       finish: null,
       air: 0,
@@ -523,6 +637,28 @@ export class View {
     };
     this.people.set(p.id, v);
     return v;
+  }
+  // Cosmetic effects that follow a player: a dust trail, sparks, a jade aura, embers.
+  cosmeticEffect(v, p, id, dt) {
+    const spec = COSMETICS.find((c) => c.id === id);
+    if (!spec || !this.fx) return;
+    v.fxClock = (v.fxClock || 0) + dt;
+    const moving = p.moving > 1.5,
+      every = id === 'dust' ? 0.12 : id === 'aura' ? 0.09 : 0.06;
+    if (v.fxClock < every) return;
+    v.fxClock = 0;
+    const color = Number(spec.color.replace('#', '0x')),
+      base = { x: p.x, y: (p.y || 0) + 0.06, z: p.z };
+    if (id === 'dust') {
+      if (moving) this.fx.emit(base, { x: 0, y: 0.5, z: 0 }, color, 0.32, 0.5, { smoke: true, grow: 1.2 });
+    } else if (id === 'sparks') {
+      if (moving) this.fx.emit({ ...base, y: base.y + 0.3 }, { x: 0, y: 1.6, z: 0 }, color, 0.07, 0.5, { gravity: 2, drag: 1.4 });
+    } else if (id === 'embers') {
+      this.fx.emit({ x: p.x + (Math.random() - 0.5) * 0.6, y: base.y + 0.4, z: p.z + (Math.random() - 0.5) * 0.6 }, { x: 0, y: 0.9, z: 0 }, color, 0.09, 0.9, { gravity: -0.6, drag: 1.2 });
+    } else if (id === 'aura') {
+      const a = Math.random() * Math.PI * 2;
+      this.fx.emit({ x: p.x + Math.cos(a) * 0.5, y: base.y, z: p.z + Math.sin(a) * 0.5 }, { x: 0, y: 0.7, z: 0 }, color, 0.1, 0.7, { drag: 1.3 });
+    }
   }
   animate(v, name) {
     if (v.animation === name) return;
@@ -587,10 +723,24 @@ export class View {
   }
   setCosmetics(value) {
     const look = appearance(value);
-    if (this.finish === look.finish) return;
-    this.finish = look.finish;
+    if (this.finish === look.finish && this.pattern === look.pattern && this.charm === look.charm) return;
     const color = new T.Color(COSMETICS.find((c) => c.id === look.finish).color);
-    for (const g of this.fpGuns) tintObject(g.children[0], color);
+    for (const g of this.fpGuns) {
+      tintObject(g.children[0], color);
+      applyPattern(g.children[0], look.pattern, color);
+      if (this.charm !== look.charm) {
+        for (const c of [...g.children]) if (c.userData.charm) g.remove(c);
+        const box = localSize(g.children[0]),
+          charm = charmMesh(look.charm, Math.max(0.02, box.size.y * 0.3));
+        if (charm) {
+          charm.position.set(box.center.x, box.center.y - box.size.y * 0.45, box.center.z - box.size.z * 0.3);
+          g.add(charm);
+        }
+      }
+    }
+    this.finish = look.finish;
+    this.pattern = look.pattern;
+    this.charm = look.charm;
   }
   removePerson(v) {
     this.scene.remove(v.root);
@@ -641,6 +791,16 @@ export class View {
     if (e.type === 'explosion') {
       const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
       this.shake = Math.max(this.shake, Math.max(0, 1 - d / 30) * 0.45);
+    }
+    if (e.type === 'quake') {
+      const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
+      this.shake = Math.max(this.shake, Math.max(0, 1 - d / 40) * 0.8);
+    }
+    // A cataclysm rolls over the whole map: everyone feels it.
+    if (e.type === 'cataclysm') this.shake = Math.max(this.shake, 1.4);
+    if (e.type === 'rift') {
+      const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
+      this.shake = Math.max(this.shake, Math.max(0, 1 - d / 60) * 0.6);
     }
   }
   // Apply authoritative destruction lists: panels, props and cars that broke, buildings that fell.
@@ -921,17 +1081,28 @@ export class View {
       const look = appearance(p.cosmetics),
         old = this.people.get(p.id);
       const ally = p.id !== id && !!this.viewTeam && p.team === this.viewTeam;
-      if (old && (old.operator !== look.operator || old.tint !== p.cosmetics?.tint || old.ally !== ally)) {
+      if (
+        old &&
+        (old.operator !== look.operator ||
+          old.tint !== look.tint ||
+          old.accessory !== look.accessory ||
+          old.charm !== look.charm ||
+          old.ally !== ally)
+      ) {
         this.removePerson(old);
         this.people.delete(p.id);
       }
       const v = this.people.get(p.id) || this.person(p, p.id === id),
         weight = v.initialized ? 1 - Math.exp(-dt * 19) : 1;
       v.initialized = true;
-      if (v.finish !== look.finish) {
+      if (v.finish !== look.finish || v.pattern !== look.pattern) {
         const color = new T.Color(COSMETICS.find((c) => c.id === look.finish).color);
-        for (const g of v.guns) tintObject(g, color);
+        for (const g of v.guns) {
+          tintObject(g, color);
+          applyPattern(g, look.pattern, color);
+        }
         v.finish = look.finish;
+        v.pattern = look.pattern;
       }
       v.root.visible =
         (menu || p.id !== id) && !p.inBus && Math.hypot(p.x - this.camera.position.x, p.z - this.camera.position.z) < (this.viewDistance || 250);
@@ -964,8 +1135,20 @@ export class View {
       v.dead = p.hp <= 0 ? v.dead + dt : 0;
       v.body.position.y = v.dead > 3 ? -Math.min(1.8, (v.dead - 3) * 0.6) : 0;
       const walking = p.moving > 0.5 && p.moving < 4.2;
+      // Emotes: the equipped one plays for a few seconds, with its own bob, spin or robot steps on top.
+      const emote = p.emote > 0 && p.hp > 0 ? COSMETICS.find((c) => c.id === look.emote) : null;
+      v.emoteClock = emote ? v.emoteClock + dt : 0;
+      const dance = emote?.dance;
+      v.body.position.y = v.dead > 3 ? v.body.position.y : dance?.bob ? Math.abs(Math.sin(v.emoteClock * (dance.speed || 5))) * dance.bob : 0;
+      v.body.rotation.y = dance?.spin
+        ? v.emoteClock * dance.spin
+        : dance?.step
+          ? Math.sin(Math.round(v.emoteClock * dance.step) * 1.1) * 0.5
+          : 0;
       const anim =
-        p.hp <= 0
+        emote
+          ? emote.clip
+          : p.hp <= 0
           ? 'Death'
           : airborne
             ? 'Jump_Idle'
@@ -989,6 +1172,7 @@ export class View {
                       ? 'Idle_Shoot'
                       : 'Idle';
       this.animate(v, anim);
+      if (look.effect !== 'noeffect' && p.hp > 0 && !p.inBus && dt > 0) this.cosmeticEffect(v, p, look.effect, dt);
       v.mixer.update(dt);
       for (const g of v.guns) g.visible = g.name === CHARACTER_GUNS[p.weapon];
       if (v.gear.jetpack) v.gear.jetpack.visible = p.gear?.id === 'jetpack' && p.hp > 0;

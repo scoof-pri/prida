@@ -7,7 +7,8 @@ import { Arena, initPhysics } from './simulation.js';
 import { View } from './render.js';
 import { WEAPONS, DEFAULT_SEED } from './world.js';
 import { initSDK, gameplay, portalStorage, portalInvite, portalRoom, portalJoin } from './sdk.js';
-import { COSMETICS, freshProfile, readProfile, buyOrEquip, rewardMatch } from './cosmetics.js';
+import { BRANCHES, NODES, ABILITY_AT, ranksIn, rankCost, buyRank, packSkills, levelOf, maxLevel } from './skills.js';
+import { COSMETICS, KINDS, itemsOfKind, pack as packCosmetics, freshProfile, readProfile, buyOrEquip, rewardMatch, PASS_TIERS, PASS_TIER_XP, passTier } from './cosmetics.js';
 import { roomCode, newRoomCode, inviteURL, validEndpoint } from './party.js';
 import { RARITIES, GEAR } from './catalog.js';
 import { LOADOUT_CHOICES, sanitizeLoadout, encodeLoadout, weaponStats } from './items.js';
@@ -65,6 +66,8 @@ const BAZOOKA_CODE = '112358';
 let inventoryOpen = false,
   interact = false,
   heal = false,
+  emote = false,
+  dash = false,
   aiming = false;
 let mapSeed = DEFAULT_SEED,
   jump = false,
@@ -115,6 +118,8 @@ function clearInput() {
   flyDown = false;
   interact = false;
   heal = false;
+  emote = false;
+  dash = false;
   aiming = false;
   lookInput.reset();
   keys.clear();
@@ -262,6 +267,7 @@ function train(kind = $('#gameMode').value) {
   const p = sim.addPlayer('you', 'YOU');
   p.cosmetics = { ...profile.equipped };
   sim.setLoadout(p, profile.loadout);
+  sim.setSkills(p, profile.skills);
   id = 'you';
   applyCheats();
   state = sim.snapshot();
@@ -354,17 +360,17 @@ function connectGroup(create = false, queue = null) {
       url.searchParams.set('mode', $('#partyMode').value);
     }
     url.searchParams.set('name', $('#nickname').value.slice(0, 16) || 'PLAYER');
-    url.searchParams.set('operator', profile.equipped.operator);
-    url.searchParams.set('finish', profile.equipped.finish);
+    url.searchParams.set('cos', packCosmetics(profile.equipped));
     url.searchParams.set('loadout', encodeLoadout(profile.loadout));
+    url.searchParams.set('skills', packSkills(profile.skills));
     // Private groups play directly between browsers by default (the host's computer runs the match); the server
     // only introduces them. Quick match always goes through the server.
     const direct = !queue && $('#directMode').checked && typeof RTCPeerConnection === 'function',
       params = {
         name: $('#nickname').value.slice(0, 16) || 'PLAYER',
-        operator: profile.equipped.operator,
-        finish: profile.equipped.finish,
+        cos: packCosmetics(profile.equipped),
         loadout: encodeLoadout(profile.loadout),
+        skills: packSkills(profile.skills),
       };
     socket = direct
       ? create
@@ -606,6 +612,8 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyR') reload = true;
   if (e.code === 'KeyE' && !e.repeat) interact = true;
   if (e.code === 'KeyH' && !e.repeat) heal = true;
+  if (e.code === 'KeyB' && !e.repeat) emote = true;
+  if (e.code === 'KeyV' && !e.repeat) dash = true;
   if (e.code === 'Space' && !e.repeat) jump = true;
   if (/^Digit[1-5]$/.test(e.code)) selectSlot(+e.code.slice(-1) - 1);
   if (e.code === 'KeyQ' && !e.repeat) selectSlot(lastSlot);
@@ -762,6 +770,8 @@ const abilityTouch = [false, false];
 });
 $('#touchReload').onclick = () => (reload = true);
 $('#interactBtn').onclick = () => (interact = true);
+$('#emoteBtn').onclick = () => (emote = true);
+$('#dashBtn').onclick = () => (dash = true);
 $('#aimBtn').onclick = () => (aiming = !aiming);
 $('#inventoryBtn').onclick = () => toggleInventory(true);
 $('#closeInventory').onclick = () => toggleInventory(false);
@@ -814,6 +824,8 @@ function input() {
       : 0,
     interact: canLook() && interact,
     heal: canLook() && heal,
+    emote: canLook() && emote,
+    dash: canLook() && dash,
     ability1: canLook() && (keys.has('KeyF') || abilityTouch[0]),
     ability2: canLook() && (keys.has('KeyG') || abilityTouch[1]),
     sprint: canLook() && (sprintTouch || keys.has('ShiftLeft') || keys.has('ShiftRight')),
@@ -830,8 +842,14 @@ function handleEvent(e) {
   if (e.type === 'relic' && e.id === id) {
     const r = RELICS[e.relic],
       keysLabel = r.abilities.map((a, k) => (touch ? '' : ['F', 'G'][k] + ' · ') + a.label).join('   ');
-    toast(`${r.name} · ${keysLabel}`, '#' + r.color.toString(16).padStart(6, '0'));
+    toast(`${r.name} · ${r.passive ? r.passive + '   ' : ''}${keysLabel}`, '#' + r.color.toString(16).padStart(6, '0'));
   }
+  if (e.type === 'crit' && e.id === id) toast(e.cyber ? 'CYBER STRIKE · ONE-SHOT' : 'ONE-SHOT · TITAN GLOVES', '#e0a33c');
+  if (e.type === 'momentum' && e.id === id) toast('MOMENTUM · INSTANT RELOAD', '#7fd6f0');
+  if (e.type === 'dash' && e.id === id) beep(1);
+  if (e.type === 'crit' && e.victim === id) toast('KILLED BY THE TITAN GLOVES', '#e0a33c');
+  if (e.type === 'ability' && e.id === id && e.ability === 'cataclysm') toast('CATACLYSM · HALF THE MAP COMES APART', '#38e0b0');
+  if (e.type === 'ability' && e.id === id && e.ability === 'rift') toast('LINE OF RUIN', '#38e0b0');
   if (e.type === 'flashback' && e.id === id) toast('FLASHBACK · YOUR SIGHT IS STUCK IN THE PAST FOR 5 s', '#e9d3ad');
   if (e.type === 'flashback' && e.by === id) toast('FLASHBACK CAST', '#c08cff');
   if (e.type === 'ability' && e.id === id && e.ability === 'summon') toast('TWO HELPER BOTS JOIN YOU FOR 25 s', '#ffb070');
@@ -883,15 +901,23 @@ function extrasHud(p, dt) {
     }
   });
   if (relic) {
-    $('#relicName').textContent = relic.name;
+    $('#relicName').textContent = relic.passive ? relic.name + ' · ' + relic.passive : relic.name;
     $('#relicName').style.color = '#' + relic.color.toString(16).padStart(6, '0');
     const html = relic.abilities
       .map((a, k) => {
         const cd = p.relic.cd[k];
-        return `<div class="${cd > 0 ? 'cool' : ''}"><span><kbd>${['F', 'G'][k]}</kbd> ${a.label}</span><span>${cd > 0 ? cd.toFixed(cd < 10 ? 1 : 0) + ' s' : 'READY'}</span></div>`;
+        const left = cd <= 0 ? 'READY' : a.once ? 'USED' : cd.toFixed(cd < 10 ? 1 : 0) + ' s';
+        return `<div class="${cd > 0 ? 'cool' : ''}"><span><kbd>${['F', 'G'][k]}</kbd> ${a.label}</span><span>${left}</span></div>`;
       })
       .join('');
     if ($('#relicAbilities').innerHTML !== html) $('#relicAbilities').innerHTML = html;
+  }
+  // DASH: the touch button only appears once the ability is unlocked, and dims while it recharges.
+  const hasDash = p.dashCd !== undefined;
+  show('#dashBtn', hasDash && p.hp > 0 && touch);
+  if (hasDash) {
+    $('#dashBtn').classList.toggle('cool', p.dashCd > 0);
+    $('#dashBtn').disabled = p.dashCd > 0;
   }
   // The nearest boss in a fight close by gets a bar at the top.
   const boss = (state.bosses || [])
@@ -1029,16 +1055,18 @@ function hud(dt) {
     if (rewardedRound !== state.round) {
       rewardedRound = state.round;
       refreshProfile();
-      const coins = rewardMatch(profile, {
+      const reward = rewardMatch(profile, {
         kills: p.score,
         win,
         cheated: state.cheated,
         seconds: (performance.now() - startedAt) / 1000,
       });
+      const unlockedNames = reward.unlocked.map((id) => COSMETICS.find((c) => c.id === id)?.name).filter(Boolean);
       $('#rewardText').textContent = state.cheated
         ? 'Sandbox match · rewards disabled'
-        : coins
-          ? '+' + coins + ' COINS'
+        : reward.coins
+          ? `+${reward.coins} COINS   +${reward.xp} PASS XP` +
+            (unlockedNames.length ? `   BATTLE PASS TIER ${profile.passTier}: ${unlockedNames.join(', ')}` : '')
           : 'No reward · match shorter than 20 seconds';
       saveProfile();
     }
@@ -1264,6 +1292,8 @@ function frame(t) {
       jump = false;
       interact = false;
       heal = false;
+      emote = false;
+      dash = false;
       acc -= 1 / 60;
     }
     state = sim.snapshot();
@@ -1279,6 +1309,8 @@ function frame(t) {
       jump = false;
       interact = false;
       heal = false;
+      emote = false;
+      dash = false;
     }
   }
   const player = state.players.find((p) => p.id === id);
@@ -1342,14 +1374,37 @@ function refreshProfile() {
     saveAvailable = false;
   }
 }
+const KIND_LABELS = {
+  operator: 'PLAYER SKIN',
+  accessory: 'ACCESSORY',
+  finish: 'WEAPON COLOUR',
+  pattern: 'WEAPON PATTERN',
+  charm: 'WEAPON CHARM',
+  effect: 'EFFECT',
+  emote: 'EMOTE',
+};
+let wardrobeKind = 'operator';
 function renderShop() {
   refreshProfile();
   updateWallet();
-  $('#shopItems').innerHTML = COSMETICS.map((c) => {
+  $('#wardrobeTabs').innerHTML = KINDS.map(
+    (k) => `<button data-kind="${k}" class="${k === wardrobeKind ? 'active' : ''}" role="tab" aria-selected="${k === wardrobeKind}">${KIND_LABELS[k]}</button>`,
+  ).join('');
+  document.querySelectorAll('[data-kind]').forEach(
+    (el) =>
+      (el.onclick = () => {
+        wardrobeKind = el.dataset.kind;
+        renderShop();
+      }),
+  );
+  $('#shopItems').innerHTML = itemsOfKind(wardrobeKind).map((c) => {
     const owned = profile.owned.includes(c.id),
-      equipped = profile.equipped[c.kind] === c.id;
-    return `<button class="shop-item ${equipped ? 'selected' : ''}" data-cosmetic="${c.id}" style="--finish:${c.color}" ${!owned && profile.coins < c.price ? 'disabled' : ''}><span class="finish-swatch"></span><small>${c.kind === 'operator' ? 'OPERATOR' : 'ALL-WEAPON FINISH'}</small><b>${c.name}</b><span>${equipped ? 'EQUIPPED' : owned ? 'EQUIP' : c.price + ' COINS'}</span></button>`;
+      equipped = profile.equipped[c.kind] === c.id,
+      locked = !owned && c.pass,
+      cost = locked ? 'BATTLE PASS' : owned ? 'EQUIP' : c.price + ' COINS';
+    return `<button class="shop-item ${equipped ? 'selected' : ''} ${locked ? 'locked' : ''}" data-cosmetic="${c.id}" style="--finish:${c.color}" ${(!owned && (c.pass || profile.coins < c.price)) ? 'disabled' : ''}><span class="finish-swatch"></span><small>${KIND_LABELS[c.kind]}</small><b>${c.name}</b><span>${equipped ? 'EQUIPPED' : cost}</span></button>`;
   }).join('');
+  renderPass();
   document.querySelectorAll('[data-cosmetic]').forEach(
     (el) =>
       (el.onclick = () => {
@@ -1366,6 +1421,64 @@ function renderShop() {
           state = sim.snapshot();
         }
         $('#shopMessage').textContent = 'Equipped. Cosmetics do not change weapon stats.';
+      }),
+  );
+}
+// Battle pass: thirty tiers, each one a cosmetic, earned by playing. No payments, no premium track.
+function renderPass() {
+  const tier = passTier(profile.passXp),
+    intoTier = profile.passXp % PASS_TIER_XP,
+    done = tier >= PASS_TIERS.length;
+  $('#passStatus').textContent = done
+    ? `TIER ${PASS_TIERS.length} / ${PASS_TIERS.length} · COMPLETE`
+    : `TIER ${tier} / ${PASS_TIERS.length} · ${PASS_TIER_XP - intoTier} XP TO THE NEXT REWARD`;
+  $('#passFill').style.width = (done ? 100 : (intoTier / PASS_TIER_XP) * 100) + '%';
+  $('#passTiers').innerHTML = PASS_TIERS.map((id, i) => {
+    const c = COSMETICS.find((x) => x.id === id) || { name: id, color: '#9aa7a3' };
+    return `<div class="pass-tier ${i < tier ? 'done' : ''}" style="--finish:${c.color}" title="${KIND_LABELS[c.kind] || ''} · ${c.name}"><i></i><b>${i + 1}</b>${c.name}</div>`;
+  }).join('');
+}
+// The skill tree: two sides, four ranks each, and the abilities that open at ten ranks on a side.
+function renderSkills() {
+  refreshProfile();
+  const level = levelOf(profile.skills);
+  $('#skillBalance').textContent = profile.coins + ' COINS';
+  $('#levelStats').textContent = `LEVEL ${level} / ${maxLevel()} · ${profile.kills} eliminations`;
+  $('#skillTree').innerHTML = BRANCHES.map((b) => {
+    const spent = ranksIn(profile.skills, b.id),
+      open = spent >= ABILITY_AT;
+    const nodes = b.nodes
+      .map((n) => {
+        const rank = profile.skills?.[n.id] || 0,
+          maxed = rank >= n.max,
+          price = rankCost(n, rank),
+          pips = Array.from({ length: n.max }, (_, i) => `<i class="${i < rank ? 'on' : ''}"></i>`).join('');
+        const sign = n.per > 0 ? '+' : '';
+        return `<button class="skill-node" data-skill="${n.id}" ${maxed || profile.coins < price ? 'disabled' : ''}><span><b>${n.name}</b><small>${sign}${n.per} % ${n.effect} per rank</small><span class="pips">${pips}</span></span><span class="price">${maxed ? 'MAX' : price + ' COINS'}</span></button>`;
+      })
+      .join('');
+    const abilities = b.abilities
+      .map((a) => `<div class="skill-ability ${open ? 'on' : ''}"><b>${a.name}</b> · ${a.text}${open ? '' : ` · ${ABILITY_AT - spent} more ranks`}</div>`)
+      .join('');
+    return `<div class="skill-branch" style="--branch:${b.color}"><h4>${b.name}</h4><p class="branch-note">${spent} / ${ABILITY_AT} ranks towards the abilities</p>${nodes}${abilities}</div>`;
+  }).join('');
+  document.querySelectorAll('[data-skill]').forEach(
+    (el) =>
+      (el.onclick = () => {
+        refreshProfile();
+        const spent = buyRank(profile, el.dataset.skill);
+        if (!spent) return;
+        saveProfile();
+        renderSkills();
+        const p = sim?.players.find((p) => p.id === id);
+        if (p) {
+          sim.setSkills(p, profile.skills);
+          state = sim.snapshot();
+        }
+        if (socket?.readyState === 1 && group?.phase === 'lobby')
+          socket.send(JSON.stringify({ type: 'skills', value: packSkills(profile.skills) }));
+        const node = NODES.find((n) => n.id === el.dataset.skill);
+        $('#skillMessage').textContent = `${node.name} rank ${profile.skills[node.id]} · −${spent} coins · level ${levelOf(profile.skills)}`;
       }),
   );
 }
@@ -1416,9 +1529,10 @@ function setTab(name) {
     b.setAttribute('aria-selected', on);
   }
   for (const p of document.querySelectorAll('[data-pane]')) p.hidden = p.dataset.pane !== name;
-  $('#menu').classList.toggle('wide', name === 'loadout' || name === 'shop');
+  $('#menu').classList.toggle('wide', name === 'loadout' || name === 'shop' || name === 'skills');
   document.body.classList.toggle('menu-wide', name !== 'play');
   if (name === 'shop') renderShop();
+  if (name === 'skills') renderSkills();
   if (name === 'loadout') renderLoadoutPanel();
   $('#menu').scrollTop = 0;
 }

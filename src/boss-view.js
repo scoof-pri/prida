@@ -22,15 +22,20 @@ const LOOKS = {
     Grey: { color: 0x2a2440, emissive: 0x1a0f40, ei: 0.4 },
     Black: { color: 0x120a24, emissive: 0x8a5cff, ei: 1.3 },
   },
-  frost: {
-    Main: { color: 0x9fdcf2, emissive: 0x1d6f93, ei: 0.35 },
-    Grey: { color: 0xeaf6fb, emissive: 0x000000, ei: 0 },
-    Black: { color: 0x2d5568, emissive: 0x9fe8ff, ei: 0.8 },
+  might: {
+    Main: { color: 0x7d6a4e, emissive: 0x3a2a12, ei: 0.2 },
+    Grey: { color: 0xb9a884, emissive: 0x000000, ei: 0 },
+    Black: { color: 0x4a3a24, emissive: 0xffb43c, ei: 1.1 },
+  },
+  chaos: {
+    Main: { color: 0x14322c, emissive: 0x0d5a48, ei: 0.5 },
+    Grey: { color: 0x9ff0d8, emissive: 0x000000, ei: 0 },
+    Black: { color: 0x07201c, emissive: 0x38e0b0, ei: 1.5 },
   },
 };
 const CLIPS = { idle: 'Idle', walk: 'Walking', attack: 'Punch', cast: 'Jump', confused: 'No', death: 'Death' };
-const CAST = { fire: 'Jump', mind: 'Wave', void: 'Wave', frost: 'Jump' };
-const SHOT_COLORS = { fireball: 0xff6a1a, psy: 0xc08cff, void: 0x7b4dff, ice: 0xbff0ff };
+const CAST = { might: 'Jump', fire: 'Jump', mind: 'Wave', void: 'Wave', chaos: 'Wave' };
+const SHOT_COLORS = { fireball: 0xff6a1a, psy: 0xc08cff, void: 0x7b4dff, boulder: 0x9b7f56, entropy: 0x38e0b0 };
 const PORTAL_COLORS = { a: 0x2f9bff, b: 0xff8a1f };
 
 export class BossViews {
@@ -71,8 +76,8 @@ export class BossViews {
       o.material.color.setHex(l.color);
       o.material.emissive = new T.Color(l.emissive);
       o.material.emissiveIntensity = l.ei;
-      o.material.metalness = b.kind === 'frost' ? 0.3 : 0.1;
-      o.material.roughness = b.kind === 'frost' ? 0.25 : 0.7;
+      o.material.metalness = b.kind === 'might' ? 0.25 : 0.1;
+      o.material.roughness = b.kind === 'chaos' ? 0.35 : 0.75;
       o.frustumCulled = false;
     });
     root.add(body);
@@ -112,19 +117,36 @@ export class BossViews {
         attach(name, f, new T.Vector3(0, name === 'Head' ? 1.45 : 0.6, 0)).userData.flame = s;
       }
     }
-    if (b.kind === 'frost') {
-      const mat = new T.MeshStandardMaterial({ color: 0xd8f6ff, emissive: 0x5cc8f0, emissiveIntensity: 0.4, roughness: 0.15, flatShading: true });
-      for (const [name, rx, rz] of [
-        ['Shoulder.L', 0.3, 0.5],
-        ['Shoulder.L', -0.2, 0.9],
-        ['Shoulder.R', 0.3, -0.5],
-        ['Shoulder.R', -0.2, -0.9],
-        ['Head', 0, 0],
-      ]) {
-        const spike = new T.Mesh(new T.ConeGeometry(0.16, 0.8, 5), mat);
-        spike.rotation.set(rx, 0, rz);
-        attach(name, spike, new T.Vector3(rz * 0.3, name === 'Head' ? 1.4 : 0.55, 0));
+    // VIS wears the gloves it drops: huge stone fists, with boulders on its shoulders.
+    if (b.kind === 'might') {
+      const stone = new T.MeshStandardMaterial({ color: 0x8a7351, emissive: 0xff9a2e, emissiveIntensity: 0.18, roughness: 0.9, flatShading: true }),
+        glove = new T.MeshStandardMaterial({ color: 0xe0a33c, emissive: 0xffb43c, emissiveIntensity: 0.55, roughness: 0.5, flatShading: true });
+      for (const name of ['Hand.L', 'Hand.R']) {
+        const fist = new T.Mesh(new T.DodecahedronGeometry(0.42, 0), glove);
+        attach(name, fist, new T.Vector3(0, 0, 0));
       }
+      for (const [name, side] of [
+        ['Shoulder.L', 1],
+        ['Shoulder.R', -1],
+      ]) {
+        const rock = new T.Mesh(new T.DodecahedronGeometry(0.5, 0), stone);
+        rock.rotation.set(0.4 * side, 0.3, 0.2 * side);
+        attach(name, rock, new T.Vector3(side * 0.12, 0.6, 0));
+      }
+    }
+    // ENTROPIA is held together by broken shards that turn around it.
+    if (b.kind === 'chaos') {
+      const shards = new T.Group(),
+        mat = new T.MeshStandardMaterial({ color: 0x0f3a32, emissive: 0x38e0b0, emissiveIntensity: 1.1, roughness: 0.3, flatShading: true });
+      for (let i = 0; i < 7; i++) {
+        const s = new T.Mesh(new T.TetrahedronGeometry(0.3 + (i % 3) * 0.12, 0), mat);
+        s.userData.phase = (i / 7) * Math.PI * 2;
+        s.userData.level = 0.7 + (i % 4) * 0.55;
+        s.userData.radius = 1.1 + (i % 3) * 0.35;
+        shards.add(s);
+      }
+      root.add(shards);
+      root.userData.shards = shards;
     }
     if (b.kind === 'mind') {
       const head = bone('Head');
@@ -236,6 +258,13 @@ export class BossViews {
         });
       }
       if (v.root.userData.halo) v.root.userData.halo.rotation.z = this.clock * 0.8;
+      if (v.root.userData.shards) {
+        v.root.userData.shards.children.forEach((s) => {
+          const a = this.clock * (1.1 + s.userData.level * 0.2) + s.userData.phase;
+          s.position.set(Math.cos(a) * s.userData.radius, s.userData.level + Math.sin(a * 1.7) * 0.2, Math.sin(a) * s.userData.radius);
+          s.rotation.set(a * 1.4, a, a * 0.7);
+        });
+      }
     }
     for (const [id, v] of this.bosses)
       if (!seen.has(id)) {

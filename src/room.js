@@ -72,8 +72,9 @@ export class Room {
     this.clients.set(id, conn);
     this.host ||= id;
     const p = this.sim.addPlayer(id, name);
-    p.cosmetics = appearance({ operator: params.operator, finish: params.finish });
+    p.cosmetics = appearance(params.cos || {});
     this.sim.setLoadout(p, decodeLoadout(params.loadout));
+    this.sim.setSkills(p, String(params.skills || '').slice(0, 16));
     this.send(conn, { type: 'welcome', id, state: this.sim.snapshot(), group: this.group() });
     this.broadcast();
     return { id };
@@ -101,6 +102,9 @@ export class Room {
     } else if (m.type === 'loadout' && this.phase === 'lobby' && p) {
       this.sim.setLoadout(p, decodeLoadout(m.value));
       this.broadcast();
+    } else if (m.type === 'skills' && this.phase === 'lobby' && p) {
+      this.sim.setSkills(p, String(m.value || '').slice(0, 16));
+      this.broadcast();
     } else if (m.type === 'start') {
       if (id !== this.host) return this.send(conn, { type: 'error', message: 'Only the host can start a match.' });
       if (this.spec.mode === 'duel' && this.clients.size < 2)
@@ -117,6 +121,7 @@ export class Room {
       const p = this.sim.addPlayer(old.id, old.name);
       p.cosmetics = old.cosmetics;
       this.sim.setLoadout(p, old.loadout);
+      this.sim.setSkills(p, old.skills);
     }
     if (start) {
       this.match++;

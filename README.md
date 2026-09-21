@@ -45,9 +45,9 @@ On CrazyGames, progress uses the SDK Data module when available. Elsewhere it is
 
 ## Controls and codes
 
-WASD / arrows move; mouse looks; LMB fires; RMB aims; Space jumps; Shift sprints; R reloads; 1–5 / mouse wheel select inventory slots, Q returns to the previous one; hold Space in the air to use a jetpack or glider; E opens a nearby chest; H uses a medkit; I / M / Tab opens inventory; Esc pauses.
+WASD / arrows move; mouse looks; LMB fires; RMB aims; Space jumps; Shift sprints; R reloads; 1–5 / mouse wheel select inventory slots, Q returns to the previous one; hold Space in the air to use a jetpack or glider; E opens a nearby chest; H uses a medkit; F / G use relic abilities; B plays your emote; V dashes (with the MOBILITY abilities unlocked); I / M / Tab opens inventory; Esc pauses.
 
-Touch: left stick, swipe the playfield to look, and separate fire, jump, sprint, aim, reload and loot buttons. The inventory handles equipment and healing. Landscape is recommended.
+Touch: left stick, swipe the playfield to look, and separate fire, jump, sprint, aim, reload, loot, emote and dash buttons. The inventory handles equipment and healing. Landscape is recommended.
 
 Open **Codes** in the lobby or **Codes / Cheat Menu** in pause and enter **250886**. Typing the six digits outside a text field also opens it. Toggles: flight, infinite ammunition and invulnerability. Flight uses Space / Up to rise, C / Down to descend, stops at 32 m, and respects buildings. Toggles remain selected until changed during the current page session. Cheats are enforced as disabled by the online server; it ignores forged cheat fields in input. Sandbox matches award no coins.
 
@@ -93,3 +93,12 @@ The SDK adapter supports gameplay start/stop, Data, room information, invitation
 Automated tests cover terrain, doors, movement, all weapons, loot, healing, armor, bot survival, stable look input, animation rigs, assets, English UI labels, cosmetic purchase/save rules, flight and cheat restrictions, the 10-player cap, storm damage, group host authority and real WebSocket clients. A full unattended Mini Royale reached a single survivor in simulation.
 
 The supervised browser preview is unavailable in this environment, so this update has not received a full WebGL visual playtest or physical-phone performance check. The client is a prototype; no zero-bug or CrazyGames certification claim is made.
+
+## Progression (all offline, saved on the device)
+
+Coins come from matches (30), eliminations (10 each) and wins (100). They buy two things:
+
+- **Wardrobe** (COSMETICS tab): player skins, head accessories, weapon colours, weapon patterns, weapon charms, personal effects and emotes. Cosmetics never change weapon stats.
+- **Skill tree** (SKILLS tab): ranks on the STRENGTH and MOBILITY sides. Every rank is one character level; ten ranks on a side unlock its two abilities (CYBER STRIKE and MOMENTUM; DASH and the faster sprint recharge). Every bonus is small and capped, and the server clamps whatever a client sends.
+
+The **battle pass** has thirty free tiers, filled by playing (60 XP a match, 25 an elimination, 200 a win; a tier is 250 XP). Each tier hands over a cosmetic as soon as it is reached. There is nothing to buy with real money anywhere in the game.

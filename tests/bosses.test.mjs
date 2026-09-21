@@ -4,10 +4,10 @@ import { Arena, initPhysics } from '../src/simulation.js';
 import { BOSSES, RELICS } from '../src/bosses.js';
 await initPhysics();
 
-test('four bosses guard lairs in the wild biomes on every map and mode', () => {
+test('the bosses guard lairs in the wild biomes on every map and mode', () => {
   for (const [mode, size] of [['classic', 'district'], ['duel', 'district'], ['royale', 'city']]) {
     const a = new Arena({ mode, size });
-    assert.deepEqual(a.bosses.list.map((b) => b.kind).sort(), ['fire', 'frost', 'mind', 'void']);
+    assert.deepEqual(a.bosses.list.map((b) => b.kind).sort(), ['chaos', 'fire', 'might', 'mind', 'void']);
     for (const b of a.bosses.list) assert.ok(b.hp > 0 && b.name.includes(BOSSES[b.kind].title));
     a.dispose();
   }
@@ -29,14 +29,14 @@ test('a boss fights back, dies to gunfire and drops its relic, which can be pick
   assert.ok(hits > 10, 'bullets hit the boss');
   assert.equal(b.hp, 0, 'boss defeated');
   const drop = a.bosses.drops[0];
-  assert.equal(drop.relic, 'gloves');
+  assert.equal(drop.relic, 'ember');
   p.cheats.god = false;
   a.place(p, drop.x, drop.z);
   for (let i = 0; i < 70; i++) a.step();
-  assert.equal(p.relic?.id, 'gloves');
+  assert.equal(p.relic?.id, 'ember');
   a.dispose();
 });
-test('relics: ring of fire burns, helpers fight for their owner, nova freezes, flashback blinds', () => {
+test('relics: ring of fire burns, helpers fight, gloves one-shot, the shard tears the map open, flashback blinds', () => {
   const a = new Arena({ mode: 'classic' }),
     p = a.addPlayer('p', 'P'),
     q = a.addPlayer('q', 'Q');
@@ -44,7 +44,7 @@ test('relics: ring of fire burns, helpers fight for their owner, nova freezes, f
   a.place(p, 0, 0);
   a.place(q, 3, 0);
   p.shield = q.shield = 0;
-  a.bosses.give(p, 'gloves');
+  a.bosses.give(p, 'ember');
   assert.ok(a.bosses.use(p, 0));
   for (let i = 0; i < 60; i++) a.step();
   assert.ok(q.hp < 100, 'ring burns enemies inside');
@@ -53,17 +53,30 @@ test('relics: ring of fire burns, helpers fight for their owner, nova freezes, f
   const helpers = a.players.filter((o) => o.helperOf === 'p');
   assert.equal(helpers.length, 2);
   assert.ok(helpers.every((h) => h.bot && h.team === p.team));
+  // TITAN GLOVES: one melee hit is a kill, whatever the blade would have done.
   q.hp = 100;
-  a.bosses.give(p, 'heart');
+  q.shield = 0;
+  a.place(q, p.x + 1.2, p.z);
+  a.bosses.give(p, 'gloves');
+  p.angle = Math.atan2(q.x - p.x, q.z - p.z);
+  p.pitch = 0;
+  p.slot = 0;
+  a.syncHeld(p);
+  a.melee(p);
+  assert.equal(q.hp, 0, 'one-shot melee');
+  // CHAOS SHARD: the cataclysm queues a wave of blasts, the line of ruin one corridor of them.
+  a.bosses.give(p, 'shard');
   assert.ok(a.bosses.use(p, 0));
-  assert.ok(q.frozen > 0);
-  const x = q.x;
-  for (let i = 0; i < 30; i++) {
-    a.input('q', { x: 1, z: 0 });
-    a.step();
-  }
-  assert.ok(Math.abs(q.x - x) < 0.05, 'frozen players cannot move');
+  assert.ok(a.bosses.pending.length > 20, 'a cataclysm rolls across the map');
+  assert.ok(!a.bosses.use(p, 0), 'only once a match');
+  const queued = a.bosses.pending.length;
+  assert.ok(a.bosses.use(p, 1));
+  assert.ok(a.bosses.pending.length > queued, 'line of ruin queued');
+  for (let i = 0; i < 60 * 6; i++) a.step();
+  assert.equal(a.bosses.pending.length, 0, 'every queued blast goes off');
   a.bosses.give(p, 'crown');
+  q.hp = 100;
+  a.place(q, p.x + 6, p.z);
   p.angle = Math.atan2(q.x - p.x, q.z - p.z);
   p.pitch = 0;
   assert.ok(a.bosses.use(p, 0));
@@ -138,5 +151,39 @@ test('lag compensation: an online shooter hits where the target was on their scr
   const before = q.hp;
   a.shoot(p);
   assert.ok(q.hp < before, 'rewound hit lands');
+  a.dispose();
+});
+test('bots: badly hurt ones break contact and heal, and everyone runs out of a ring of fire', () => {
+  const a = new Arena({ mode: 'classic', random: () => 0.5 }),
+    bot = a.addPlayer('b1', 'BOT', true),
+    foe = a.addPlayer('p', 'P');
+  for (const b of a.bosses.list) b.hp = 0;
+  a.place(bot, 0, 0);
+  a.place(foe, 0, 7);
+  bot.shield = foe.shield = 0;
+  bot.hp = 25;
+  bot.medkits = 1;
+  bot.brain.hurtAt = a.tick / 60;
+  let retreated = false;
+  for (let i = 0; i < 60 * 3 && !retreated; i++) {
+    a.step();
+    if (bot.brain.mode === 'retreat') retreated = true;
+  }
+  assert.ok(retreated, 'the bot pulled back');
+  // With the enemy gone it patches itself up.
+  foe.hp = 0;
+  let healed = false;
+  for (let i = 0; i < 60 * 12 && !healed; i++) {
+    a.step();
+    if (bot.hp > 25) healed = true;
+  }
+  assert.ok(healed, 'and used its medkit');
+  // A ring of fire under a bot sends it running out of the flames.
+  const runner = a.addPlayer('b2', 'BOT2', true);
+  a.place(runner, 20, 20);
+  runner.hp = 100;
+  a.bosses.hazards.push({ id: 1, kind: 'ring', x: 20, z: 20, y: runner.y, r: 6, time: 5, max: 5, owner: 'p', team: 'p:p', dps: 20 });
+  for (let i = 0; i < 90; i++) a.step();
+  assert.ok(Math.hypot(runner.x - 20, runner.z - 20) > 4, 'it left the fire');
   a.dispose();
 });

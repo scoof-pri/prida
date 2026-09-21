@@ -382,7 +382,76 @@ export class CombatEffects {
       });
     }
   }
+  // A flat shockwave ring on the ground, used by explosions, quakes and the cataclysm.
+  groundRing(x, z, color = 0xffcc80, life = 0.45, grow = 6, peak = 0.55) {
+    while (this.rings.length >= 10) {
+      const r = this.rings.shift();
+      r.mesh.removeFromParent();
+      r.mesh.material.dispose();
+    }
+    const mesh = new T.Mesh(
+      this.ringGeo,
+      new T.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: peak,
+        depthWrite: false,
+        side: T.DoubleSide,
+        blending: T.AdditiveBlending,
+        toneMapped: false,
+      }),
+    );
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(x, groundHeight(x, z, this.map) + 0.075, z);
+    this.scene.add(mesh);
+    this.rings.push({ mesh, life, max: life, grow, peak });
+  }
   event(e) {
+    // TITAN GLOVES · QUAKE: the ground bursts and throws dirt outwards.
+    if (e.type === 'quake') {
+      const y = groundHeight(e.x, e.z, this.map);
+      this.groundRing(e.x, e.z, 0xffb43c, 0.75, (e.r || 10) / 1.1, 0.7);
+      this.burst({ x: e.x, y: y + 0.3, z: e.z }, 18, 0xc9a978, 0.6, 1.1, true, 4);
+      for (let i = 0; i < (this.lite ? 6 : 18); i++) {
+        const a = rand(0, Math.PI * 2),
+          r = rand(1, e.r || 10);
+        this.addDebris(
+          { x: e.x + Math.cos(a) * r, y: y + 0.2, z: e.z + Math.sin(a) * r },
+          { x: Math.cos(a) * rand(1, 4), y: rand(4, 9), z: Math.sin(a) * rand(1, 4) },
+          rand(1, 2),
+          rand(0.08, 0.2),
+          0x8a7351,
+        );
+      }
+      return;
+    }
+    // CHAOS SHARD: a seam of green light tears open along the ground ahead.
+    if (e.type === 'rift') {
+      const n = Math.min(16, Math.round((e.length || 20) / 3));
+      for (let i = 1; i <= n; i++) {
+        const d = (i / n) * (e.length || 20),
+          x = e.x + Math.sin(e.angle) * d,
+          z = e.z + Math.cos(e.angle) * d,
+          y = groundHeight(x, z, this.map);
+        this.emit({ x, y: y + 0.2, z }, { x: 0, y: rand(5, 11), z: 0 }, 0x38e0b0, rand(0.3, 0.7), rand(0.5, 1), { drag: 1.5, grow: 1.4 });
+        if (i % 2 === 0) this.groundRing(x, z, 0x38e0b0, 0.5, 3.5, 0.5);
+      }
+      return;
+    }
+    // CATACLYSM: the sky goes green and the horizon lights up before the blasts arrive.
+    if (e.type === 'cataclysm') {
+      this.groundRing(e.x, e.z, 0x38e0b0, 1.6, (e.r || 60) / 1.05, 0.8);
+      this.burst({ x: e.x, y: e.y + 1, z: e.z }, 26, 0x9ff0d8, 1.2, 1.6, false, 7);
+      this.flashTime = 0.4;
+      this.light.position.set(e.x, e.y + 3, e.z);
+      return;
+    }
+    // A one-shot melee kill sparks gold.
+    if (e.type === 'crit') {
+      this.burst({ x: e.x, y: e.y, z: e.z }, 16, 0xffd06a, 0.16, 0.5, false, 5);
+      this.burst({ x: e.x, y: e.y, z: e.z }, 6, 0xffffff, 0.3, 0.3, false, 2);
+      return;
+    }
     if (e.type === 'melee') {
       if (e.hit) this.burst({ x: e.x, y: e.y, z: e.z }, 6, 0xffe4b8, 0.1, 0.25, false, 2.2);
       else if (e.wall) {
@@ -411,27 +480,7 @@ export class CombatEffects {
           rand(0.05, 0.14),
           0x786957,
         );
-      if (this.rings.length >= 6) {
-        const r = this.rings.shift();
-        r.mesh.removeFromParent();
-        r.mesh.material.dispose();
-      }
-      const mesh = new T.Mesh(
-        this.ringGeo,
-        new T.MeshBasicMaterial({
-          color: 0xffcc80,
-          transparent: true,
-          opacity: 0.65,
-          depthWrite: false,
-          side: T.DoubleSide,
-          blending: T.AdditiveBlending,
-          toneMapped: false,
-        }),
-      );
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.position.set(e.x, groundHeight(e.x, e.z, this.map) + 0.075, e.z);
-      this.scene.add(mesh);
-      this.rings.push({ mesh, life: 0.45 });
+      this.groundRing(e.x, e.z, 0xffcc80);
       this.light.position.copy(pos);
       this.flashTime = 0.22;
       return;
@@ -606,8 +655,9 @@ export class CombatEffects {
         r.mesh.material.dispose();
         this.rings.splice(i, 1);
       } else {
-        r.mesh.scale.setScalar(0.2 + (1 - r.life / 0.45) * 6);
-        r.mesh.material.opacity = (r.life / 0.45) * 0.55;
+        const max = r.max || 0.45;
+        r.mesh.scale.setScalar(0.2 + (1 - r.life / max) * (r.grow || 6));
+        r.mesh.material.opacity = (r.life / max) * (r.peak || 0.55);
       }
     }
     this.flashTime = Math.max(0, this.flashTime - dt);

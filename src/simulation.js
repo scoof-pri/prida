@@ -17,7 +17,8 @@ import {
 } from './items.js';
 import { Navigation } from './navigation.js';
 import { BossSystem } from './bosses.js';
-import { COSMETICS } from './cosmetics.js';
+import { COSMETICS, appearance, pack as packCosmetics } from './cosmetics.js';
+import { perks as skillPerks, unpackSkills, packSkills } from './skills.js';
 // Clothing colour variations for bots (applied to uniform materials only, never to skin).
 export const BOT_TINTS = 8;
 const FINISHES = COSMETICS.filter((c) => c.kind === 'finish').map((c) => c.id);
@@ -334,7 +335,10 @@ export class Arena {
   addPlayer(id, name, bot = false, { force = false } = {}) {
     if (this.players.some((p) => p.id === id) || (!force && this.players.filter((p) => !p.helperOf).length >= this.maxPlayers)) return;
     const p = {
-      cosmetics: { operator: 'soldier', finish: 'standard' },
+      cosmetics: appearance(),
+      perks: skillPerks({}),
+      skills: '',
+      dashCd: 0,
       cheats: { flight: false, infinite: false, god: false, bazooka: false },
       id,
       name: String(name).slice(0, 16),
@@ -362,6 +366,8 @@ export class Arena {
       armor: 0,
       interactHeld: false,
       healHeld: false,
+      emoteHeld: false,
+      emote: 0,
       healing: 0,
       reload: 0,
       cooldown: 0,
@@ -403,11 +409,11 @@ export class Arena {
       p.squad = 'sq' + Math.floor(n / size);
       p.team = this.mode === 'survival' ? 'bots' : p.squad;
       const pick = (a) => a[Math.floor(this.random() * a.length)];
-      p.cosmetics = {
+      p.cosmetics = appearance({
         operator: pick(['soldier', 'hazmat', 'scout']),
         finish: pick(FINISHES),
         tint: Math.floor(this.random() * BOT_TINTS),
-      };
+      });
     } else p.team = p.squad = 'p:' + id;
     const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
     const collider = this.world.createCollider(RAPIER.ColliderDesc.capsule(0.48, 0.36), body);
@@ -548,6 +554,8 @@ export class Arena {
       heal: once('heal'),
       ability1: i.ability1 === true,
       ability2: i.ability2 === true,
+      emote: once('emote'),
+      dash: once('dash'),
     };
     // Round-trip time the client measured (ms), used to rewind targets for its shots (lag compensation).
     if (Number.isFinite(i.lag)) p.lag = clamp(i.lag, 0, 400);
@@ -739,6 +747,24 @@ export class Arena {
       return { angle: p.angle + clamp(diff, -1.8 * dt, 1.8 * dt), diff };
     };
     b.wantLoot = null;
+    // 0) Danger on the ground (a ring of fire, a boss hazard): step out of it before anything else.
+    const hazard = this.bosses.hazards.find(
+      (h) => h.team !== p.team && Math.hypot(p.x - h.x, p.z - h.z) < h.r + 1.4 && Math.abs(p.y - h.y) < 3,
+    );
+    if (hazard) {
+      const dx = p.x - hazard.x,
+        dz = p.z - hazard.z,
+        d = Math.hypot(dx, dz) || 1;
+      return {
+        x: (dx / d) * 1,
+        z: (dz / d) * 1,
+        angle: Math.atan2(dx, dz),
+        pitch: 0,
+        slot,
+        fire: false,
+        sprint: true,
+      };
+    }
     // 1) Storm: get inside the safe circle first.
     if (this.mode === 'royale' && Math.hypot(p.x, p.z) > Math.max(2, this.zone.radius - 9)) {
       const m = this.moveAlong(p, { x: 0, z: 0 }, 1, 0.8);
@@ -752,8 +778,46 @@ export class Arena {
         sprint: p.stamina > 40,
       };
     }
-    // 2) Cover: when badly hurt, reloading under fire, or just hit.
     const hurt = now - (b.hurtAt ?? -99) < 1.2;
+    // 2) Break contact: a badly hurt bot backs off behind something, patches up and comes back, instead of
+    // trading shots until it dies.
+    if (b.mode !== 'retreat' && target && !melee && p.hp < 38 && now > (b.retreatCooldown || 0)) {
+      b.mode = 'retreat';
+      b.retreatCooldown = now + 14;
+      b.retreatUntil = now + 7;
+      b.cover = this.findCover(p, target);
+      b.pathTimer = 0;
+    }
+    if (b.mode === 'retreat') {
+      const safe = !target || !this.sight(p, target);
+      if (now > b.retreatUntil || p.hp > 75 || (safe && p.hp > 55 && p.medkits === 0)) b.mode = 'fight';
+      else {
+        const spot = b.cover,
+          far = spot && Math.hypot(spot.x - p.x, spot.z - p.z) > 0.8;
+        let m = { x: 0, z: 0 };
+        if (far) m = this.moveAlong(p, spot, 1, 0.9);
+        else if (target && !safe) {
+          const dx = p.x - target.x,
+            dz = p.z - target.z,
+            d = Math.hypot(dx, dz) || 1;
+          m = { x: (dx / d) * 0.9, z: (dz / d) * 0.9 };
+        }
+        const look = target ? aimAt(target.x, target.z) : { angle: p.angle, diff: 0 },
+          // Standing still is part of using a medkit: sprinting or firing cancels it.
+          wantHeal = safe && p.medkits > 0 && p.hp < 70 && !far;
+        return {
+          ...(wantHeal ? { x: 0, z: 0 } : m),
+          angle: look.angle,
+          pitch: 0,
+          slot,
+          fire: false,
+          reload: !melee,
+          heal: wantHeal,
+          sprint: !wantHeal,
+        };
+      }
+    }
+    // 3) Cover: when badly hurt, reloading under fire, or just hit.
     if (
       b.mode !== 'cover' &&
       target &&
@@ -775,16 +839,25 @@ export class Arena {
       if (now > b.coverUntil || !b.cover) b.mode = 'fight';
       else {
         const there = Math.hypot(b.cover.x - p.x, b.cover.z - p.z) < 0.7,
-          m = there ? { x: 0, z: 0 } : this.moveAlong(p, b.cover, 1, 0.9),
           look = target || b.threat,
-          { angle, diff } = aimAt(look.x, look.z);
+          { angle, diff } = aimAt(look.x, look.z),
+          // Lean out of cover to shoot, then slide back behind it.
+          peeking = b.phase % 3.2 < 0.9;
+        let m = there ? { x: 0, z: 0 } : this.moveAlong(p, b.cover, 1, 0.9);
+        if (there && peeking && look) {
+          const dx = look.x - b.cover.x,
+            dz = look.z - b.cover.z,
+            d = Math.hypot(dx, dz) || 1,
+            side = (Number(p.id.replace(/\D/g, '')) || 0) % 2 ? 1 : -1;
+          m = { x: ((-dz / d) * side) * 0.45, z: ((dx / d) * side) * 0.45 };
+        }
         return {
           ...m,
           angle,
           pitch: 0,
           slot,
           // Pop shots only when the enemy is visible from cover; otherwise reload and patch up.
-          fire: !!target && there && !p.reload && Math.abs(diff) < 0.12 && b.phase % 1.6 < 0.35,
+          fire: !!target && there && peeking && !p.reload && Math.abs(diff) < 0.12,
           reload: !melee && !!item && item.ammo < weaponStats(item.w, item.r).mag,
           heal: there && p.hp < 70 && p.medkits > 0 && !target,
           sprint: !there,
@@ -809,9 +882,14 @@ export class Arena {
         };
       }
     } else {
-      // 4) Calm: loot a chest in reach, follow the squad leader, or patrol.
+      // 4) Calm: help a squadmate in a fight, loot a chest in reach, follow the squad leader, or patrol.
       const leader = [p, ...mates].sort((a, c) => (a.id < c.id ? -1 : 1))[0];
       let goal = null;
+      // Reinforce: a mate shooting or being shot at pulls the rest of the squad in.
+      const fighting = mates
+        .filter((m) => (m.brain.targetId || now - (m.brain.hurtAt ?? -99) < 3) && Math.hypot(m.x - p.x, m.z - p.z) < 55)
+        .sort((m, n) => Math.hypot(m.x - p.x, m.z - p.z) - Math.hypot(n.x - p.x, n.z - p.z))[0];
+      if (fighting && Math.hypot(fighting.x - p.x, fighting.z - p.z) > 6) goal = { x: fighting.x, z: fighting.z };
       if (b.memory > 0 && b.lastSeen) goal = b.lastSeen;
       if (!goal && !this.respawns) {
         const chest = this.chests
@@ -838,20 +916,35 @@ export class Arena {
       } else if (goal === b.lastSeen && Math.hypot(goal.x - p.x, goal.z - p.z) < 1.8) b.memory = 0;
       if (Math.hypot(goal.x - p.x, goal.z - p.z) > 0.6) move = this.moveAlong(p, goal, 0.6, 1.3);
     }
+    // Suppressing fire: an enemy that just ducked behind a wall still gets shot at for a moment.
+    const suppress =
+      !target &&
+      !melee &&
+      b.memory > 2.2 &&
+      b.lastSeen &&
+      item &&
+      item.ammo > 2 &&
+      Math.hypot(b.lastSeen.x - p.x, b.lastSeen.z - p.z) < 26 &&
+      b.phase % 2.6 < 0.4;
     const look = target
       ? aimAt(target.x, target.z)
-      : Math.hypot(move.x, move.z) > 0.01
-        ? aimAt(p.x + move.x, p.z + move.z)
-        : { angle: p.angle, diff: 0 };
+      : suppress
+        ? aimAt(b.lastSeen.x, b.lastSeen.z)
+        : Math.hypot(move.x, move.z) > 0.01
+          ? aimAt(p.x + move.x, p.z + move.z)
+          : { angle: p.angle, diff: 0 };
     const fire = !target
-      ? false
+      ? suppress && Math.abs(look.diff) < 0.12
       : melee
         ? distance < w.range && Math.abs(look.diff) < 0.45
         : b.seenFor > 0.85 &&
           distance < 25 &&
           Math.abs(look.diff) < 0.15 &&
           (w.spinup ? b.phase % 3 < 1.8 : b.phase % 2.2 < 0.6);
-    const ability = this.bosses.botChoice(p, target, distance);
+    const ability = this.bosses.botChoice(p, target, distance),
+      // Out of contact and hurt: stand still and patch up before looking for the next fight.
+      wantHeal = !target && b.memory <= 0 && p.hp < 60 && p.medkits > 0;
+    if (wantHeal || p.healing > 0) move = { x: 0, z: 0 };
     return {
       ...move,
       ability1: ability === 0,
@@ -860,9 +953,13 @@ export class Arena {
       pitch: target ? Math.atan2(target.y - p.y - 0.4, Math.max(distance, 1)) : 0,
       slot,
       fire,
+      heal: wantHeal,
       reload: lowAmmo && !target,
       jump: hurt && this.random() < 0.01,
-      sprint: (melee && !!target && distance > 3) || (!target && Math.hypot(move.x, move.z) > 0.5 && p.stamina > 60),
+      sprint:
+        !wantHeal &&
+        p.healing <= 0 &&
+        ((melee && !!target && distance > 3) || (!target && Math.hypot(move.x, move.z) > 0.5 && p.stamina > 60)),
     };
   }
   step(dt = 1 / 60) {
@@ -953,6 +1050,13 @@ export class Arena {
         p.reload = 0;
       }
       p.healHeld = !!i.heal;
+      // Emotes: a few seconds of showing off, cancelled the moment you move, shoot or take a hit.
+      if (i.emote && !p.emoteHeld && p.hp > 0 && !p.inBus && !p.dropping && p.grounded) p.emote = 4;
+      p.emoteHeld = !!i.emote;
+      if (p.emote > 0) {
+        if (i.fire || i.jump || i.reload || Math.hypot(i.x || 0, i.z || 0) > 0.05 || p.hp <= 0) p.emote = 0;
+        else p.emote = Math.max(0, p.emote - dt);
+      }
       if (p.healing > 0) {
         if (i.fire || i.sprint) {
           p.healing = 0;
@@ -973,13 +1077,28 @@ export class Arena {
       z /= n;
       if (p.stamina >= 25) p.sprintLocked = false;
       p.sprinting = !!i.sprint && !i.fire && !p.sprintLocked && p.stamina > 0 && Math.hypot(x, z) > 0.1;
-      p.stamina = clamp(p.stamina + (p.sprinting ? -25 : 18) * dt, 0, 100);
+      p.stamina = clamp(
+        p.stamina + (p.sprinting ? -25 * (p.perks?.drain ?? 1) : 18 * (p.perks?.regen ?? 1)) * dt,
+        0,
+        100,
+      );
       if (p.stamina === 0) p.sprintLocked = true;
       if (i.jump && !p.jumpHeld && p.grounded) {
-        p.vy = 7.8;
+        p.vy = 7.8 * (p.perks?.jump || 1);
         p.grounded = false;
       }
       p.jumpHeld = !!i.jump;
+      // DASH (MOBILITY 10): a burst in the direction you are moving, or forward when standing still.
+      p.dashCd = Math.max(0, (p.dashCd || 0) - dt);
+      if (i.dash && p.perks?.dash && p.dashCd <= 0 && p.hp > 0 && !p.inBus && !p.dropping && !p.healing) {
+        const has = Math.hypot(x, z) > 0.05,
+          ax = has ? x * Math.cos(p.angle) + z * Math.sin(p.angle) : Math.sin(p.angle),
+          az = has ? -x * Math.sin(p.angle) + z * Math.cos(p.angle) : Math.cos(p.angle),
+          n2 = Math.hypot(ax, az) || 1;
+        p.push = { x: (ax / n2) * 15, z: (az / n2) * 15 };
+        p.dashCd = 8;
+        this.events.push({ type: 'dash', id: p.id, x: p.x, y: p.y, z: p.z, angle: p.angle });
+      }
       // Back-worn gear: jetpack thrust or glider while the jump / ascend control is held in the air.
       const hold = (i.ascend || 0) > 0,
         gear = p.gear && GEAR.find((g) => g.id === p.gear.id);
@@ -1020,7 +1139,10 @@ export class Arena {
       const body = this.bodies.get(p.id),
         speed = p.dropping
           ? 13
-          : (p.gliding ? 10 : p.sprinting ? 9 : 5.8) * (p.healing > 0 ? 0.35 : 1) * (p.gliding ? 1 : w.move || 1),
+          : (p.gliding ? 10 : p.sprinting ? 9 : 5.8) *
+            (p.healing > 0 ? 0.35 : 1) *
+            (p.gliding ? 1 : w.move || 1) *
+            (p.gliding ? 1 : p.perks?.speed || 1),
         push = p.push || { x: 0, z: 0 };
       // Knock-back and portal flings fade out over about a second.
       if (p.push) {
@@ -1050,10 +1172,18 @@ export class Arena {
       }
       if (!item) continue;
       if (w.spinup) p.spin = clamp(p.spin + (i.fire && !p.reload ? dt : -dt * 1.5) / w.spinup, 0, 1);
-      if (i.reload && item.ammo < stats.mag && item.reserve > 0 && !p.reload) p.reload = stats.reload;
+      // MOMENTUM (STRENGTH 10): one reload in three is over before it starts.
+      const reloadTime = () => {
+        if (p.perks?.momentum && this.random() < 0.3) {
+          this.events.push({ type: 'momentum', id: p.id });
+          return 0.001;
+        }
+        return stats.reload * (p.perks?.reload || 1);
+      };
+      if (i.reload && item.ammo < stats.mag && item.reserve > 0 && !p.reload) p.reload = reloadTime();
       if (i.fire && p.cooldown === 0 && !p.reload && !p.healing && (!w.spinup || p.spin >= 1)) {
         if (item.ammo > 0) this.shoot(p);
-        else if (item.reserve > 0) p.reload = stats.reload;
+        else if (item.reserve > 0) p.reload = reloadTime();
       }
     }
     // A full physics step is only needed when colliders were added or removed (it rebuilds the broad phase, which
@@ -1146,7 +1276,7 @@ export class Arena {
     const eyeRay = this.bosses.ray({ x: p.x, y: p.y + EYE_HEIGHT, z: p.z }, direction(p.angle, p.pitch), w.range + 1.2);
     if (eyeRay && (!victim || eyeRay.distance < best)) {
       victim = null;
-      this.bosses.damage(eyeRay.boss, w.damage * 1.2, p);
+      this.bosses.damage(eyeRay.boss, w.damage * (p.relic?.id === 'gloves' ? 5 : 1.2) * (p.perks?.melee || 1), p);
       this.events.push({ type: 'melee', id: p.id, weapon: p.weapon, hit: true, wall: null, x: eyeRay.boss.x, y: eyeRay.boss.y + 1.6, z: eyeRay.boss.z, shot: p.shot });
       return;
     }
@@ -1179,7 +1309,13 @@ export class Arena {
       shot: p.shot,
     });
     if (victim) {
-      this.damage(p, victim, Math.round(w.damage * (p.bot ? 0.5 : 1)));
+      // TITAN GLOVES: the blow lands like the colossus' own — one hit, one kill.
+      // CYBER STRIKE (STRENGTH 10): one blow in three does the same.
+      const titan = p.relic?.id === 'gloves',
+        cyber = !titan && p.perks?.cyber && this.random() < 0.3;
+      if (titan || cyber)
+        this.events.push({ type: 'crit', id: p.id, victim: victim.id, cyber, x: victim.x, y: victim.y + 1.1, z: victim.z });
+      this.damage(p, victim, titan || cyber ? 999 : Math.round(w.damage * (p.bot ? 0.5 : 1) * (p.perks?.melee || 1)));
       this.alert(p, w);
     }
   }
@@ -1297,6 +1433,12 @@ export class Arena {
     this.syncHeld(p);
     p.gear = makeGear(p.loadout.gear);
   }
+  // Skill-tree ranks from a client, clamped to the table in skills.js. Bots never carry perks.
+  setSkills(p, skills) {
+    if (!p || p.bot) return;
+    p.skills = packSkills(typeof skills === 'string' ? unpackSkills(skills) : skills || {});
+    p.perks = skillPerks(unpackSkills(p.skills));
+  }
   dropLoot(x, z, contents, by = null) {
     const drop = {
       id: 'drop' + ++this.dropId,
@@ -1383,6 +1525,10 @@ export class Arena {
         victim.brain.memory = 4;
       }
     }
+    // Firepower and Hard Target: small, capped multipliers from the skill tree.
+    // (Damage-over-time comes in fractions of a point, so this must not round.)
+    amount = amount * (attacker && attacker !== victim ? attacker.perks?.damage || 1 : 1) * (victim.perks?.taken || 1);
+    if (amount <= 0) return;
     const absorbed = Math.min(victim.armor, Math.round(amount * 0.5));
     victim.armor -= absorbed;
     victim.hp = Math.max(0, victim.hp - amount + absorbed);
@@ -1554,8 +1700,12 @@ export class Arena {
       mode: this.mode,
       ...this.bosses.snapshot(),
       bus: this.bus ? { ...this.bus } : null,
-      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, ...p }) => ({
+      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, perks, skills, ...p }) => ({
         ...p,
+        // Only what the client draws: whether DASH is unlocked and how long it has left.
+        dashCd: perks?.dash ? Math.round(p.dashCd * 10) / 10 : undefined,
+        // Cosmetics ride along in every packet, so they travel packed into one short string.
+        cosmetics: packCosmetics(p.cosmetics),
         slots: p.slots.map((s) => (s ? { ...s } : null)),
         gear: p.gear ? { ...p.gear } : null,
         loadout: { ...p.loadout },

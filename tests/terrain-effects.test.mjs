@@ -16,7 +16,7 @@ test('multi-plot buildings, four parks and five wild biomes form an exact non-ov
     assert.equal(new Set(cells).size, 70);
     assert.equal(m.parks.length, 9);
     assert.deepEqual(m.parks.slice(4).map((p) => p.type).sort(), ['desert', 'forest', 'glade', 'lake', 'meadow']);
-    assert.deepEqual(m.lairs.map((l) => l.boss).sort(), ['fire', 'frost', 'mind', 'void']);
+    assert.deepEqual(m.lairs.map((l) => l.boss).sort(), ['chaos', 'fire', 'might', 'mind', 'void']);
     assert.equal(m.plots.filter((p) => p.type === 'building' && p.cells.length === 2).length, 6);
     assert.equal(new Set(m.buildings.map((b) => b.type)).size, 30);
     for (const p of m.plots) {

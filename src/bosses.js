@@ -1,9 +1,10 @@
-// Bosses and their relics. Four bosses guard lairs in the wild biomes (see world.js LAIRS); each drops a relic
+// Bosses and their relics. Bosses guard lairs in the wild biomes (see world.js LAIRS); each drops a relic
 // with special abilities when defeated:
-//   IGNIS · FIRE GOLEM (desert)  → FIRE GLOVES: ring of fire around you, summon two helper bots
-//   NOEMA · MIND ORACLE (glade)  → MIND CROWN: replace an enemy's sight with a flashback of their own past view
-//   NULL · VOID WARDEN (lake)    → VOID PORTAL GUN: a blue and an orange portal, like Portal
-//   HIEMS · FROST TITAN (forest) → FROST HEART: frost nova that freezes enemies around you
+//   VIS · STRENGTH COLOSSUS (forest) → TITAN GLOVES: every melee hit is a one-shot kill, plus a ground quake
+//   IGNIS · FIRE GOLEM (desert)      → EMBER CORE: ring of fire around you, summon two helper bots
+//   NOEMA · MIND ORACLE (glade)      → MIND CROWN: replace an enemy's sight with a flashback of their own past
+//   ENTROPIA · CHAOS HERALD (meadow) → CHAOS SHARD: once a match, blow up half the map; or a line of ruin ahead
+//   NULL · VOID WARDEN (lake)        → VOID PORTAL GUN: a blue and an orange portal, like Portal
 // The simulation owns all of it (authoritative online); clients only draw the snapshot.
 import { groundHeight } from './terrain.js';
 import { castMap } from './raycast.js';
@@ -11,20 +12,30 @@ import { rayBox, direction, EYE_HEIGHT } from './combat.js';
 import { lineClear } from './world.js';
 
 export const BOSSES = {
-  fire: { name: 'IGNIS', title: 'FIRE GOLEM', hp: 1800, relic: 'gloves', speed: 3.1, color: 0xff6a2a },
+  might: { name: 'VIS', title: 'STRENGTH COLOSSUS', hp: 2400, relic: 'gloves', speed: 2.8, color: 0xe0a33c },
+  fire: { name: 'IGNIS', title: 'FIRE GOLEM', hp: 1800, relic: 'ember', speed: 3.1, color: 0xff6a2a },
   mind: { name: 'NOEMA', title: 'MIND ORACLE', hp: 1400, relic: 'crown', speed: 2.6, float: 1.1, color: 0xb482ff },
+  chaos: { name: 'ENTROPIA', title: 'CHAOS HERALD', hp: 2000, relic: 'shard', speed: 3.2, float: 0.6, color: 0x38e0b0 },
   void: { name: 'NULL', title: 'VOID WARDEN', hp: 1600, relic: 'portal', speed: 3.4, color: 0x6a4cff },
-  frost: { name: 'HIEMS', title: 'FROST TITAN', hp: 2000, relic: 'heart', speed: 2.7, color: 0x8fe3ff },
 };
 export const BOSS_SHOTS = {
+  might: { kind: 'boulder', speed: 17, damage: 26, radius: 3, every: 3, count: 1 },
   fire: { kind: 'fireball', speed: 19, damage: 22, radius: 2.6, every: 2.4, count: 1 },
   mind: { kind: 'psy', speed: 15, damage: 16, radius: 0, every: 1.7, count: 1, homing: 1.4 },
+  chaos: { kind: 'entropy', speed: 22, damage: 18, radius: 2.2, every: 2, count: 2 },
   void: { kind: 'void', speed: 24, damage: 20, radius: 0, every: 2.1, count: 1 },
-  frost: { kind: 'ice', speed: 30, damage: 11, radius: 0, every: 2.7, count: 3, chill: 0.6 },
 };
 export const RELICS = {
   gloves: {
-    name: 'FIRE GLOVES',
+    name: 'TITAN GLOVES',
+    boss: 'might',
+    color: 0xe0a33c,
+    // The gloves' real power is passive: any melee hit kills outright (see Arena.melee).
+    passive: 'ONE-SHOT MELEE',
+    abilities: [{ id: 'quake', label: 'QUAKE', cd: 14 }],
+  },
+  ember: {
+    name: 'EMBER CORE',
     boss: 'fire',
     color: 0xff6a2a,
     abilities: [
@@ -33,6 +44,15 @@ export const RELICS = {
     ],
   },
   crown: { name: 'MIND CROWN', boss: 'mind', color: 0xb482ff, abilities: [{ id: 'flashback', label: 'FLASHBACK', cd: 24 }] },
+  shard: {
+    name: 'CHAOS SHARD',
+    boss: 'chaos',
+    color: 0x38e0b0,
+    abilities: [
+      { id: 'cataclysm', label: 'CATACLYSM · ONCE', cd: 1e9, once: true },
+      { id: 'rift', label: 'LINE OF RUIN', cd: 30 },
+    ],
+  },
   portal: {
     name: 'VOID PORTAL GUN',
     boss: 'void',
@@ -42,7 +62,6 @@ export const RELICS = {
       { id: 'portalB', label: 'ORANGE PORTAL', cd: 0.5 },
     ],
   },
-  heart: { name: 'FROST HEART', boss: 'frost', color: 0x8fe3ff, abilities: [{ id: 'nova', label: 'FROST NOVA', cd: 18 }] },
 };
 export const BOSS_HEIGHT = 3.4;
 export const BOSS_WIDTH = 1.6;
@@ -90,6 +109,8 @@ export class BossSystem {
     this.portals = {};
     this.drops = [];
     this.dropId = 0;
+    // Blasts that go off later: a cataclysm and a line of ruin roll across the map instead of firing at once.
+    this.pending = [];
   }
   get time() {
     return this.a.tick / 60;
@@ -156,6 +177,7 @@ export class BossSystem {
     for (const b of this.list) this.stepBoss(b, dt);
     this.stepShots(dt);
     this.stepHazards(dt);
+    this.stepPending(dt);
     for (const p of a.players) {
       if (p.frozen > 0) p.frozen = Math.max(0, p.frozen - dt);
       if (p.flashback > 0) p.flashback = Math.max(0, p.flashback - dt);
@@ -284,10 +306,33 @@ export class BossSystem {
     } else if (b.anim === 'walk') b.anim = 'idle';
     b.y = groundHeight(b.x, b.z, a.map) + (info.float || 0);
   }
+  // Blasts queued by a cataclysm or a line of ruin: one goes off at a time, so a whole quarter of the map
+  // comes apart in a rolling wave instead of a single frame-killing explosion.
+  stepPending(dt) {
+    for (let n = this.pending.length - 1; n >= 0; n--) {
+      const q = this.pending[n];
+      q.at -= dt;
+      if (q.at > 0) continue;
+      this.pending.splice(n, 1);
+      this.a.blast(q.x, q.y, q.z, q.radius, q.damage, q.owner?.hp > 0 ? q.owner : null, q.cause || 'explosion');
+    }
+  }
+  queueBlast(x, z, radius, damage, owner, delay, cause) {
+    this.pending.push({ x, y: groundHeight(x, z, this.a.map) + 1, z, radius, damage, owner, at: delay, cause });
+  }
   // Signature moves.
   special(b, t, dist) {
     const a = this.a;
-    if (b.kind === 'fire' && dist < 12) {
+    if (b.kind === 'might' && dist < 9) {
+      b.cd.special = 12;
+      this.quakeAt(b.x, b.z, 9, 26, null, b);
+    } else if (b.kind === 'chaos' && dist < 26) {
+      b.cd.special = 14;
+      // A short line of ruin towards its target.
+      const ang = Math.atan2(t.x - b.x, t.z - b.z);
+      this.lineOfRuin(b.x, b.z, ang, 18, 5, 26, null, 'chaos');
+      a.events.push({ type: 'rift', x: b.x, y: b.y, z: b.z, angle: ang, length: 18, by: b.id });
+    } else if (b.kind === 'fire' && dist < 12) {
       b.cd.special = 11;
       this.hazards.push({ id: ++this.shotId, kind: 'ring', x: b.x, z: b.z, y: b.y, r: 6, time: 4.5, max: 4.5, owner: b.id, team: 'boss', dps: 20 });
       a.events.push({ type: 'fire-ring', x: b.x, y: b.y, z: b.z, r: 6 });
@@ -305,14 +350,6 @@ export class BossSystem {
       b.z = z;
       b.angle = Math.atan2(t.x - x, t.z - z);
       b.cd.melee = 0.2;
-    } else if (b.kind === 'frost' && dist < 9) {
-      b.cd.special = 10;
-      for (const p of a.players)
-        if (p.hp > 0 && hyp(p.x - b.x, p.z - b.z) < 9 && this.exposed(b, p)) {
-          p.frozen = Math.max(p.frozen || 0, 1.6);
-          this.hurt(p, 14, b);
-        }
-      a.events.push({ type: 'nova', x: b.x, y: b.y, z: b.z, r: 9 });
     } else return false;
     b.anim = 'cast';
     b.animTime = 0;
@@ -472,19 +509,57 @@ export class BossSystem {
     else t.o.flashback = FLASHBACK_TIME;
     this.a.events.push({ type: 'flashback', id: t.o.id, by: p.id, x: t.o.x, y: t.o.y, z: t.o.z });
   }
-  nova(p) {
-    const a = this.a;
-    for (const o of a.enemies(p))
-      if (hyp(o.x - p.x, o.z - p.z) < 9 && Math.abs(o.y - p.y) < 3) {
-        o.frozen = Math.max(o.frozen || 0, 2.5);
-        a.damage(p, o, 12);
+  // TITAN GLOVES · QUAKE: the ground bursts around you, throwing enemies off their feet.
+  quake(p) {
+    this.quakeAt(p.x, p.z, 10, 34, p, null);
+  }
+  quakeAt(x, z, radius, damage, owner, boss) {
+    const a = this.a,
+      y = groundHeight(x, z, a.map);
+    for (const o of a.players) {
+      if (o.hp <= 0 || o === owner || (owner && o.team === owner.team) || (boss && o.helperOf)) continue;
+      const d = hyp(o.x - x, o.z - z);
+      if (d > radius || Math.abs(o.y - y) > 4) continue;
+      const k = 1 - (d / radius) * 0.7;
+      if (owner) a.damage(owner, o, Math.round(damage * k));
+      else this.hurt(o, Math.round(damage * k), boss);
+      const n = d || 1;
+      o.push = { x: ((o.x - x) / n) * 11 * k, z: ((o.z - z) / n) * 11 * k };
+      o.vy = Math.max(o.vy || 0, 5.5 * k);
+    }
+    if (owner) for (const b of this.alive()) if (hyp(b.x - x, b.z - z) < radius + 1) this.damage(b, damage * 1.6, owner);
+    // It cracks the ground and whatever stands on it.
+    a.blast(x, y + 0.4, z, radius * 0.55, damage * 0.6, owner, 'quake');
+    a.events.push({ type: 'quake', x, y, z, r: radius, by: owner?.id || boss?.id || null });
+  }
+  // CHAOS SHARD · CATACLYSM: once a match, half the location comes apart in a rolling wave of blasts.
+  cataclysm(p) {
+    const a = this.a,
+      reach = Math.min(70, Math.max(a.map.limit.x, a.map.limit.z) * 0.55),
+      rings = 5;
+    a.events.push({ type: 'cataclysm', id: p.id, x: p.x, y: p.y, z: p.z, r: reach });
+    for (let i = 1; i <= rings; i++) {
+      const r = (reach * i) / rings,
+        count = 4 + i * 3;
+      for (let k = 0; k < count; k++) {
+        const ang = (k / count) * Math.PI * 2 + i * 0.7,
+          x = p.x + Math.sin(ang) * r,
+          z = p.z + Math.cos(ang) * r;
+        if (Math.abs(x) > a.map.limit.x - 2 || Math.abs(z) > a.map.limit.z - 2) continue;
+        this.queueBlast(x, z, 9, 90, p, i * 0.45 + k * 0.02, 'cataclysm');
       }
-    for (const b of this.alive())
-      if (hyp(b.x - p.x, b.z - p.z) < 10) {
-        b.frozen = 3;
-        this.damage(b, 40, p);
-      }
-    a.events.push({ type: 'nova', x: p.x, y: p.y, z: p.z, r: 9, by: p.id });
+    }
+  }
+  // CHAOS SHARD · LINE OF RUIN: everything in a corridor ahead of you is torn open.
+  rift(p) {
+    const ang = p.angle;
+    this.lineOfRuin(p.x, p.z, ang, 46, 7, 70, p, 'rift');
+    this.a.events.push({ type: 'rift', id: p.id, x: p.x, y: p.y, z: p.z, angle: ang, length: 46, by: p.id });
+  }
+  lineOfRuin(x, z, angle, length, radius, damage, owner, cause) {
+    const step = radius * 0.8;
+    for (let d = radius; d <= length; d += step)
+      this.queueBlast(x + Math.sin(angle) * d, z + Math.cos(angle) * d, radius, damage, owner, (d / length) * 0.9, cause);
   }
   portalA(p) {
     return this.placePortal(p, 'a');
@@ -582,9 +657,11 @@ export class BossSystem {
     const ids = RELICS[p.relic.id].abilities.map((a) => a.id),
       ready = (id) => ids.includes(id) && p.relic.cd[ids.indexOf(id)] <= 0;
     if (ready('ring') && distance < 6) return ids.indexOf('ring');
+    if (ready('quake') && distance < 8) return ids.indexOf('quake');
     if (ready('summon') && distance < 25) return ids.indexOf('summon');
-    if (ready('nova') && distance < 8) return ids.indexOf('nova');
     if (ready('flashback') && distance < 40) return ids.indexOf('flashback');
+    // Bots only open a line of ruin, never a cataclysm — that one is the player's card to play.
+    if (ready('rift') && distance > 8 && distance < 40) return ids.indexOf('rift');
     return -1;
   }
   snapshot() {

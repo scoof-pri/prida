@@ -603,7 +603,7 @@ export const BIOME_LOTS = [
 ];
 export const BIOME_TYPES = BIOME_LOTS.map((b) => b[0]);
 // Which boss guards which biome (first biome set only).
-export const LAIRS = { desert: 'fire', glade: 'mind', lake: 'void', forest: 'frost' };
+export const LAIRS = { forest: 'might', desert: 'fire', glade: 'mind', meadow: 'chaos', lake: 'void' };
 function wild(map, p, rand, addProp) {
   const { hills, trees, rocks, spawns, chests, waters, flora } = map,
     first = !map.lairs.some((l) => l.biome === p.type),

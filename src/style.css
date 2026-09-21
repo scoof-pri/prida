@@ -78,3 +78,42 @@ body.touch #minimap{width:112px;height:112px;top:62px;right:18px}body.touch #rel
 @media(max-height:520px){#minimap{width:104px;height:104px;top:58px}#feed{top:170px!important}#ability1Btn{right:290px;bottom:150px}#ability2Btn{right:236px;bottom:150px}#bossBar{top:96px}}
 
 .direct-row{display:flex!important;align-items:center;gap:8px;font-size:10px!important;margin:10px 0 4px}.direct-row input{width:auto;display:inline;margin:0}
+
+/* Wardrobe tabs and the battle-pass track. */
+.wardrobe-tabs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
+.wardrobe-tabs button{padding:8px 12px;font-size:11px;letter-spacing:.8px;background:#2b4a4c;border:1px solid var(--outline);border-radius:4px;color:#dbe7df}
+.wardrobe-tabs button.active{background:var(--accent);color:#22343a;border-color:var(--accent)}
+.shop-item.locked{opacity:.5}
+.shop-item .pass-tag{font-size:10px;color:#ffd79c;letter-spacing:.6px}
+#passPanel{margin-top:18px;padding-top:14px;border-top:1px solid var(--outline)}
+.pass-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.pass-head b{letter-spacing:1.4px}
+.pass-head span{font-size:12px;color:var(--muted)}
+.pass-track{height:8px;border-radius:4px;background:#24403f;overflow:hidden;margin:10px 0 12px}
+.pass-track i{display:block;height:100%;background:linear-gradient(90deg,#7fd6b0,#ffd79c)}
+.pass-tiers{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:6px}
+.pass-tier{padding:6px 4px;border:1px solid var(--outline);border-radius:4px;text-align:center;font-size:10px;color:var(--muted);background:#27403f}
+.pass-tier.done{border-color:var(--accent);color:#e9f6ee;background:#3a5b53}
+.pass-tier b{display:block;font-size:11px;color:inherit}
+.pass-tier i{display:block;height:6px;border-radius:2px;margin-bottom:4px;background:var(--finish)}
+#emoteBtn{position:absolute;right:16px;bottom:250px;width:56px;height:56px;border-radius:50%}
+@media(max-width:700px){.pass-tiers{grid-template-columns:repeat(5,minmax(0,1fr))}}
+
+/* Skill tree. */
+.skill-tree{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+.skill-branch{border:1px solid var(--outline);border-radius:6px;padding:14px;background:#2b4a4c}
+.skill-branch h4{margin:0 0 4px;letter-spacing:1.6px;color:var(--branch)}
+.skill-branch .branch-note{font-size:12px;color:var(--muted);margin:0 0 10px}
+.skill-node{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--outline);border-radius:4px;margin-bottom:8px;background:#27403f;width:100%;text-align:left}
+.skill-node:disabled{opacity:.5}
+.skill-node b{display:block;font-size:14px}
+.skill-node small{font-size:11px;color:var(--muted)}
+.skill-node .pips{display:flex;gap:3px;margin-top:5px}
+.skill-node .pips i{width:14px;height:5px;border-radius:2px;background:#46605d}
+.skill-node .pips i.on{background:var(--branch)}
+.skill-node .price{font-size:12px;color:#ffe2b7;white-space:nowrap}
+.skill-ability{padding:8px 10px;border-radius:4px;border:1px dashed var(--outline);margin-top:8px;font-size:12px;color:var(--muted)}
+.skill-ability.on{border-style:solid;border-color:var(--branch);color:#eaf6ee}
+.skill-ability b{color:var(--branch);letter-spacing:1px}
+#dashBtn{position:absolute;right:88px;bottom:250px;width:56px;height:56px;border-radius:50%}
+@media(max-width:700px){.skill-tree{grid-template-columns:1fr}}
