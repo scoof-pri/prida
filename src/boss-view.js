@@ -281,10 +281,11 @@ export class BossViews {
   // The battle bus: a blue coach hanging under a striped balloon, open windows so riders can look out.
   makeBus() {
     const g = new T.Group(),
-      paint = new T.MeshStandardMaterial({ color: 0x2f6fd6, roughness: 0.55, side: T.DoubleSide }),
-      trim = new T.MeshStandardMaterial({ color: 0xf2f2ea, roughness: 0.6, side: T.DoubleSide }),
+      // Closed boxes: front faces only. Glossy paint, chrome trim and reflective glass under the sky light.
+      paint = new T.MeshStandardMaterial({ color: 0x2f6fd6, roughness: 0.32, metalness: 0.3, envMapIntensity: 1.3 }),
+      trim = new T.MeshStandardMaterial({ color: 0xf2f2ea, roughness: 0.25, metalness: 0.6, envMapIntensity: 1.2 }),
       dark = new T.MeshStandardMaterial({ color: 0x1d2328, roughness: 0.8 }),
-      glass = new T.MeshStandardMaterial({ color: 0x9fd6ff, transparent: true, opacity: 0.18, roughness: 0.05, side: T.DoubleSide, depthWrite: false }),
+      glass = new T.MeshStandardMaterial({ color: 0x9fd6ff, transparent: true, opacity: 0.18, roughness: 0.03, envMapIntensity: 1.6, depthWrite: false }),
       box = (w, h, d, m, x, y, z) => {
         const mesh = new T.Mesh(new T.BoxGeometry(w, h, d), m);
         mesh.position.set(x, y, z);

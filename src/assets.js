@@ -1,24 +1,39 @@
 import * as T from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
-import { BUILDING_TYPES, WEAPONS, GEAR } from './catalog.js';
+import { WEAPONS, GEAR } from './catalog.js';
 import { DECOR_SIZES } from './decor-sizes.js';
 const models = new Map(),
   textures = new Map();
-// CC0 ambientCG colour maps (see ASSET-CREDITS.md). Mean sRGB colour lets materials keep their palette and use
-// the texture as detail only.
+// CC0 Poly Haven PBR sets (see ASSET-CREDITS.md): colour map, OpenGL normal map (_n) and AO/roughness/metal map
+// (_arm), 512 px. The mean sRGB colour lets "painted" materials keep their palette and use the texture as detail.
 export const TEXTURES = {
-  grass: [96, 109, 48],
-  dirt: [152, 147, 87],
-  sand: [155, 138, 110],
-  asphalt: [69, 68, 67],
-  paving: [139, 138, 130],
-  plaster: [215, 211, 207],
-  bricks: [159, 115, 91],
-  wood: [154, 123, 94],
-  concrete: [185, 185, 185],
-  tiles: [128, 128, 128],
+  bricks: [150, 111, 80],
+  plaster: [171, 163, 160],
+  concrete: [106, 99, 88],
+  asphalt: [90, 90, 85],
+  paving: [99, 87, 69],
+  grass: [145, 135, 93],
+  dirt: [101, 84, 51],
+  sand: [130, 114, 91],
+  tiles: [121, 111, 107],
+  wood: [155, 128, 99],
+  roof: [120, 122, 120],
+  metal: [61, 50, 28],
+  bark: [95, 86, 64],
+  rock: [167, 155, 140],
+  claytiles: [145, 79, 42],
+  corrugated: [88, 87, 80],
+  gravel: [64, 59, 53],
+  fabric: [145, 171, 205],
+  oak: [161, 126, 87],
+  panels: [141, 133, 112],
+  sidewalk: [127, 116, 102],
+  pinebark: [102, 82, 64],
 };
+// Foliage cards (RGBA, composed from ambientCG leaf atlases by scripts/make-foliage.py).
+export const FOLIAGE = ['leaves', 'needles'];
+const TEXTURE_FILES = [...Object.keys(TEXTURES).flatMap((n) => [n, n + '_n', n + '_arm']), ...FOLIAGE];
 // Embedded glTF images are normally decoded through blob: URLs, which strict hosts (Content-Security-Policy
 // without blob:) refuse, leaving city, car and prop models untextured white. Decode them straight from the
 // binary with createImageBitmap instead (data: URL image as a fallback), so no URL is ever fetched.
@@ -101,10 +116,12 @@ export function setTextureQuality(level = 'medium') {
 async function loadTextures(done) {
   const loader = new T.TextureLoader();
   await Promise.all(
-    Object.keys(TEXTURES).map(async (name) => {
-      const t = await loader.loadAsync(`./textures/${name}.jpg`);
-      t.wrapS = t.wrapT = T.RepeatWrapping;
-      t.colorSpace = T.SRGBColorSpace;
+    TEXTURE_FILES.map(async (name) => {
+      const card = FOLIAGE.includes(name),
+        t = await loader.loadAsync(`./textures/${name}.${card ? 'webp' : 'jpg'}`);
+      t.wrapS = t.wrapT = card ? T.ClampToEdgeWrapping : T.RepeatWrapping;
+      // Normal and AO/roughness maps hold data, not colour.
+      t.colorSpace = /_(n|arm)$/.test(name) ? T.NoColorSpace : T.SRGBColorSpace;
       t.anisotropy = 4;
       textures.set(name, t);
       done();
@@ -112,9 +129,9 @@ async function loadTextures(done) {
   );
 }
 export async function loadAssets(progress = () => {}) {
+  // Building roofs are procedural since 0.20 (roofs.js): the city-kit building models are not loaded.
   const names = [
     ...new Set([
-      ...BUILDING_TYPES.map((b) => b.model),
       ...WEAPONS.map((w) => w.model),
       ...GEAR.map((g) => g.model),
       ...Object.keys(DECOR_SIZES).map((n) => 'decor-' + n),
@@ -127,7 +144,7 @@ export async function loadAssets(progress = () => {}) {
   ];
   let next = 0,
     done = 0;
-  const total = names.length + Object.keys(TEXTURES).length,
+  const total = names.length + TEXTURE_FILES.length,
     loader = makeGltfLoader();
   await Promise.all([
     loadTextures(() => progress(++done, total)),
@@ -141,6 +158,9 @@ export async function loadAssets(progress = () => {}) {
             o.receiveShadow = true;
             for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
               m.roughness = 0.85;
+              // The kits flag their materials double-sided, but the meshes are closed: back faces are never seen,
+              // so they are culled (half the fragments of every prop). Only the glider's canopy is a thin sheet.
+              if (name !== 'glider') m.side = T.FrontSide;
             }
           }
         });

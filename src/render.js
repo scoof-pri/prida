@@ -1,7 +1,11 @@
 import { COSMETICS, appearance } from './cosmetics.js';
 import { CombatEffects } from './effects.js';
-import { makeGround, makeSky, makeWater, detailMaterial } from './materials.js';
+import { groundChunks, makeSky, makeWater, detailMaterial, makeEnvironment, setSurfaceQuality, WORLD } from './materials.js';
 import { Scenery } from './scenery.js';
+import { chimneyOf } from './roofs.js';
+import { Nature } from './nature.js';
+import { GrassField } from './grass.js';
+import { ChestField } from './chests.js';
 import { BossViews } from './boss-view.js';
 import { syncDestruction } from './destruction.js';
 import { groundHeight } from './terrain.js';
@@ -200,6 +204,15 @@ function reloadPose(style, t) {
   }
   return p;
 }
+// Destruction only grows during a match (damaged-cell masks can vanish when their wall falls, so they don't count).
+const destructionCount = (d) =>
+  (d.panels?.length || 0) +
+  (d.decor?.length || 0) +
+  (d.buildings?.length || 0) +
+  (d.wrecks?.length || 0) +
+  (d.props?.length || 0) +
+  (d.roofs?.length || 0) +
+  Object.keys(d.storeys || {}).length;
 export class View {
   constructor(canvas) {
     this.renderer = new T.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -211,9 +224,14 @@ export class View {
     this.renderer.toneMappingExposure = 1.1;
     this.scene = new T.Scene();
     this.scene.background = new T.Color(0xc5d9cc);
-    this.scene.fog = new T.Fog(0xc0d6d1, 95, 245);
+    // Aerial haze in the horizon colour of the sky.
+    this.scene.fog = new T.Fog(new T.Color().setRGB(0.5, 0.62, 0.77, T.LinearSRGBColorSpace), 95, 245);
     this.sky = makeSky();
     this.scene.add(this.sky);
+    // Image-based light and reflections from the sky (glass, cars, wet-looking asphalt, metal).
+    this.envTarget = makeEnvironment(this.renderer);
+    this.scene.environment = this.envTarget.texture;
+    this.scene.environmentIntensity = 0.85;
     this.camera = new T.PerspectiveCamera(43, 1, 0.15, 450);
     this.camera.position.set(0, 65, 64);
     this.camera.lookAt(0, 0, 0);
@@ -223,8 +241,9 @@ export class View {
     this.waters = [];
     this.chestViews = new Map();
     this.rocketViews = new Map();
-    this.scene.add(new T.HemisphereLight(0xc5e5ef, 0x85835d, 1.6));
-    this.sun = new T.DirectionalLight(0xffe0b4, 3.0);
+    this.hemi = new T.HemisphereLight(0xc5e5ef, 0x85835d, 0.55);
+    this.scene.add(this.hemi);
+    this.sun = new T.DirectionalLight(0xffe4be, 3.2);
     this.sun.position.set(-70, 130, 70);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(
@@ -280,6 +299,15 @@ export class View {
     parent.add(m);
     return m;
   }
+  // A horizontal quad (road paint): two triangles instead of a box.
+  flat(x, y, z, w, d, material, parent = this.terrain || this.scene) {
+    this.flatGeo ??= new T.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    const m = new T.Mesh(this.flatGeo, material);
+    m.position.set(x, y, z);
+    m.scale.set(w, 1, d);
+    parent.add(m);
+    return m;
+  }
   text(label, w = 3, h = 0.55, color = '#f7e5be', bg = '#29464a') {
     const c = document.createElement('canvas');
     c.width = 512;
@@ -302,15 +330,18 @@ export class View {
     if (this.map?.seed === seed && this.map?.size === mapSize(size)) return;
     if (this.terrain) {
       this.scene.remove(this.terrain);
+      const shared = new Set();
       this.terrain.traverse((o) => {
         if (o.userData.batched || o.userData.ownedTexture || o.userData.standalone) o.geometry?.dispose();
-        if (o.userData.standalone) o.material.dispose();
+        if (o.userData.sharedMaterial) shared.add(o.material);
+        else if (o.userData.standalone) o.material.dispose();
         if (o.userData.props) o.dispose();
         if (o.userData.ownedTexture) {
           o.material.map.dispose();
           o.material.dispose();
         }
       });
+      for (const m of shared) m.dispose();
     }
     for (const v of this.chestViews.values()) this.disposeLoot(v);
     this.chestViews.clear();
@@ -319,15 +350,19 @@ export class View {
     this.waters = [];
     this.terrain = new T.Group();
     this.scene.add(this.terrain);
-    this.world();
-    this.batchStatic();
     this.scenery?.dispose();
     this.scenery = this.useAssets === false ? null : new Scenery(this.scene, this.map);
+    if (this.scenery) this.scenery.culler.lite = !!this.lite;
+    this.world();
+    this.batchStatic();
+    this.grass?.dispose();
+    this.grass = new GrassField(this.map, this.scene, this.lite);
     this.collapsing = new Set();
     this.burning = new Set();
     this.chimneys = this.map.buildings
-      .filter((b) => b.category === 'industry' && b.height >= 9)
-      .map((b) => ({ b, x: b.x + b.w * 0.25, y: b.height + 0.6, z: b.z - b.d * 0.2, clock: Math.random() }));
+      .map((b) => [b, chimneyOf(b)])
+      .filter(([, c]) => c)
+      .map(([b, c]) => ({ b, x: c.x, y: c.top + 0.3, z: c.z, clock: Math.random() }));
     this.shake = 0;
   }
   world() {
@@ -336,19 +371,18 @@ export class View {
       L = map.limit;
     // Skirt under the whole district, deep enough to stay below the quarry pit.
     this.box(0, -5, 0, L.x * 2 + 6, 1.2, L.z * 2 + 6, 0x788574);
-    parent.add(makeGround(map));
-    const asphalt = detailMaterial('asphalt', palette.road, { scale: 0.22, strength: 0.85 }),
-      paving = detailMaterial('paving', 0xd9d2bd, { scale: 0.45, strength: 0.7 }),
-      dirtPath = detailMaterial('dirt', 0xaa9576, { scale: 0.35, strength: 0.7 }),
-      marking = this.mat(0xf1ead2);
+    parent.add(groundChunks(map));
+    const asphalt = detailMaterial('asphalt', palette.road, { box: true, strength: 0.85, roughness: 0.85 }),
+      paving = detailMaterial('paving', 0xd9d2bd, { box: true, strength: 0.7 }),
+      dirtPath = detailMaterial('dirt', 0xaa9576, { box: true, strength: 0.7 }),
+      // Road paint keeps the asphalt's grain and cracks.
+      marking = detailMaterial('asphalt', 0xf2eee2, { box: true, albedo: 0, strength: 0.9, key: 'paint', roughness: 0.7 });
     for (const r of map.roads) {
       this.box(r.x, 0.03, r.z, r.w, 0.06, r.d, asphalt);
       // Dashed centre line along straight segments.
       if (r.w !== r.d)
         for (let t = -Math.max(r.w, r.d) / 2 + 1.5; t < Math.max(r.w, r.d) / 2 - 1; t += 3)
-          r.w > r.d
-            ? this.box(r.x + t, 0.062, r.z, 1.4, 0.004, 0.14, marking)
-            : this.box(r.x, 0.062, r.z + t, 0.14, 0.004, 1.4, marking);
+          r.w > r.d ? this.flat(r.x + t, 0.062, r.z, 1.4, 0.14, marking) : this.flat(r.x, 0.062, r.z + t, 0.14, 1.4, marking);
     }
     for (const r of map.paths) this.box(r.x, 0.035, r.z, r.w, 0.04, r.d, r.color === 0xaa9576 ? dirtPath : paving);
     for (const water of map.waters) {
@@ -358,136 +392,44 @@ export class View {
     }
     this.signs = new Map();
     const floors = {
-      home: detailMaterial('wood', 0xc9ab86, { scale: 0.7, strength: 0.75 }),
-      office: detailMaterial('wood', 0xb8a58c, { scale: 0.7, strength: 0.6 }),
-      shop: detailMaterial('tiles', 0xd8d2c4, { scale: 0.5, strength: 0.35 }),
-      industry: detailMaterial('concrete', 0xb8b6ad, { scale: 0.3, strength: 0.7 }),
+      home: detailMaterial('wood', 0xc9ab86, { box: true, strength: 0.75, roughness: 0.6 }),
+      office: detailMaterial('wood', 0xb8a58c, { box: true, strength: 0.6, roughness: 0.6 }),
+      shop: detailMaterial('tiles', 0xd8d2c4, { box: true, strength: 0.35, roughness: 0.5 }),
+      industry: detailMaterial('concrete', 0xb8b6ad, { box: true, strength: 0.7 }),
     };
-    const sidewalk = detailMaterial('paving', 0xb0b5a1, { scale: 0.5, strength: 0.6 });
+    const sidewalk = detailMaterial('sidewalk', 0xb0b5a1, { box: true, strength: 0.6 }),
+      curb = detailMaterial('concrete', 0xc9c5ba, { box: true, key: 'curb' });
     for (const b of map.buildings) {
       this.box(b.x, 0.012, b.z, b.w + 2, 0.025, b.d + 2, sidewalk);
+      // Kerb stones along the edge of the pavement.
+      for (const s of [-1, 1]) {
+        this.box(b.x, 0.04, b.z + s * (b.d / 2 + 1), b.w + 2.2, 0.08, 0.2, curb);
+        this.box(b.x + s * (b.w / 2 + 1), 0.04, b.z, 0.2, 0.08, b.d + 2, curb);
+      }
       this.box(b.x, 0.025, b.z, b.w - 0.4, 0.04, b.d - 0.4, floors[b.category] || floors.home);
       const sign = this.text(b.sign.toUpperCase(), Math.min(b.w - 1, 5), 0.52);
       sign.position.set(b.x, 3.25, b.z + b.d / 2 + 0.04);
       parent.add(sign);
       this.signs.set(b.id, sign);
     }
-    // Remaining static obstacles (crates, benches, pond rim). Walls, furniture and street props live in Scenery.
-    // Destructible props (trees, rocks, crates, benches) are instanced per shape, so one can vanish on its own
-    // while they still cost a few draw calls.
-    for (const g of Object.values(this.propShapes || {})) g.dispose();
-    const props = new Map(),
-      shapes = (this.propShapes = {
-        rock: new T.DodecahedronGeometry(1, 0),
-        pine: new T.ConeGeometry(1.6, 4.5, 7),
-        broad: new T.IcosahedronGeometry(2, 0),
-      }),
-      m4 = new T.Matrix4(),
-      q = new T.Quaternion(),
-      one = (x, y, z, sx, sy, sz) => m4.clone().compose(new T.Vector3(x, y, z), q, new T.Vector3(sx, sy, sz));
-    const keep = (id, geometry, color, matrix) => {
-      const material = this.mat(color),
-        key = geometry.uuid + ':' + material.uuid;
-      if (!props.has(key)) props.set(key, { geometry, material, items: [] });
-      props.get(key).items.push({ id, matrix });
-    };
-    for (const b of map.obstacles.filter(
-      (o) => o.building === undefined && o.decor === undefined && !['tree', 'rock', 'bench-back'].includes(o.part),
-    ))
-      if (b.prop === undefined) this.box(b.x, b.y, b.z, b.w, b.h, b.d, b.color);
-      else keep(b.prop, this.cube, b.color, one(b.x, b.y, b.z, b.w, b.h, b.d));
-    for (const rock of map.rocks) keep(rock.prop, shapes.rock, rock.color, one(rock.x, rock.y, rock.z, rock.w * 0.55, rock.h * 0.55, rock.d * 0.55));
-    const treeProps = new Map(map.obstacles.filter((o) => o.part === 'tree').map((o) => [o.tree, o.prop]));
-    for (const [i, [x, z, type]] of map.trees.entries()) {
-      const y = groundHeight(x, z, map),
-        id = treeProps.get(i);
-      keep(id, this.cube, 0x7c6b54, one(x, y + 1.2, z, 0.5, 2.4, 0.5));
-      keep(id, shapes[type], type === 'pine' ? 0x487862 : 0x6c9c6b, one(x, y + (type === 'pine' ? 3.7 : 3.4), z, 1, 1, 1));
-    }
-    // Cacti get two arms; hay bales and logs stay boxes.
-    for (const c of map.obstacles.filter((o) => o.part === 'cactus')) {
-      keep(c.prop, this.cube, 0x5f8a4a, one(c.x + 0.45, c.ground + c.h * 0.55, c.z, 0.4, 0.3, 0.4));
-      keep(c.prop, this.cube, 0x5f8a4a, one(c.x + 0.62, c.ground + c.h * 0.72, c.z, 0.3, 0.6, 0.3));
-      keep(c.prop, this.cube, 0x5a8446, one(c.x - 0.42, c.ground + c.h * 0.42, c.z, 0.35, 0.28, 0.35));
-      keep(c.prop, this.cube, 0x5a8446, one(c.x - 0.56, c.ground + c.h * 0.58, c.z, 0.28, 0.5, 0.28));
-    }
-    this.flora(map, parent);
-    for (const b of map.cover.filter((c) => c.part === 'bench')) {
-      keep(b.prop, this.cube, 0x976f4c, one(b.x, b.ground + 0.77, b.z + 0.26, b.w, 0.55, 0.13));
-      for (const side of [-1, 1]) keep(b.prop, this.cube, 0x455c58, one(b.x + side * 0.7, b.ground + 0.22, b.z, 0.09, 0.44, 0.5));
-    }
-    this.propSlots = new Map();
-    for (const { geometry, material, items } of props.values()) {
-      const mesh = new T.InstancedMesh(geometry, material, items.length);
-      items.forEach((it, i) => {
-        mesh.setMatrixAt(i, it.matrix);
-        if (!this.propSlots.has(it.id)) this.propSlots.set(it.id, []);
-        this.propSlots.get(it.id).push({ mesh, index: i });
-      });
-      mesh.castShadow = mesh.receiveShadow = true;
-      mesh.userData.props = true;
-      parent.add(mesh);
-    }
-    for (const z of [-L.z, L.z]) this.box(0, 1, z, L.x * 2, 2, 0.25, 0x667d75);
-    for (const x of [-L.x, L.x]) this.box(x, 1, 0, 0.25, 2, L.z * 2, 0x667d75);
-  }
-  // Ground cover in the wild biomes: grass, flowers, ferns, bushes, reeds and desert shrubs. Render only.
-  flora(map, parent) {
-    const kinds = {
-      grass: { geo: new T.ConeGeometry(0.09, 0.7, 3), color: 0x6f9a48, y: 0.35, n: 3, spread: 0.25 },
-      flower: { geo: new T.IcosahedronGeometry(0.12, 0), color: 0xffffff, y: 0.45, n: 1, stem: true },
-      fern: { geo: new T.ConeGeometry(0.55, 0.5, 5), color: 0x4f7a3f, y: 0.25, n: 1 },
-      bush: { geo: new T.IcosahedronGeometry(0.7, 0), color: 0x4d7440, y: 0.45, n: 1 },
-      reed: { geo: new T.CylinderGeometry(0.04, 0.05, 1.5, 4), color: 0x7f8f4c, y: 0.4, n: 4, spread: 0.35 },
-      shrub: { geo: new T.DodecahedronGeometry(0.45, 0), color: 0x8a8a52, y: 0.25, n: 1 },
-    };
-    const petals = [0xf0d24a, 0xe46f7b, 0xf3f0ea, 0x9c7fe0],
-      stemGeo = new T.CylinderGeometry(0.02, 0.02, 0.45, 3),
-      byKind = new Map(),
-      m4 = new T.Matrix4(),
-      q = new T.Quaternion(),
-      e = new T.Euler(),
-      col = new T.Color();
-    let seed = map.seed >>> 0;
-    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
-    const add = (key, geo, color, x, y, z, s, tint) => {
-      if (!byKind.has(key)) byKind.set(key, { geo, color, list: [] });
-      q.setFromEuler(e.set((rnd() - 0.5) * 0.3, rnd() * 6.28, (rnd() - 0.5) * 0.3));
-      byKind.get(key).list.push([m4.compose(new T.Vector3(x, y, z), q, new T.Vector3(s, s, s)).clone(), tint]);
-    };
-    for (const f of map.flora) {
-      const k = kinds[f.kind];
-      if (!k) continue;
-      for (let i = 0; i < k.n; i++) {
-        const x = f.x + (rnd() - 0.5) * (k.spread || 0),
-          z = f.z + (rnd() - 0.5) * (k.spread || 0),
-          g = groundHeight(x, z, map);
-        if (f.kind !== 'reed' && map.waters.some((w) => w.lake && g < w.y + 0.05)) continue;
-        add(f.kind, k.geo, k.color, x, g + k.y * f.s, z, f.s, f.kind === 'flower' ? petals[f.c || 0] : undefined);
-        if (k.stem) add('stem', stemGeo, 0x5f8a3f, x, g + 0.22 * f.s, z, f.s);
-      }
-    }
-    this.floraGeos = [...Object.values(kinds).map((k) => k.geo), stemGeo];
-    for (const { geo, color, list } of byKind.values()) {
-      const mesh = new T.InstancedMesh(geo, new T.MeshStandardMaterial({ color, roughness: 0.9, flatShading: true }), list.length);
-      list.forEach(([m, tint], i) => {
-        mesh.setMatrixAt(i, m);
-        if (tint !== undefined) mesh.setColorAt(i, col.setHex(tint));
-      });
-      mesh.receiveShadow = true;
-      mesh.userData.props = true;
-      mesh.userData.standalone = true;
-      parent.add(mesh);
-    }
+    // Walls, furniture and street props live in Scenery. The pond rims are stone; trees, rocks, cacti, logs, hay, crates, benches and plants are the Nature field.
+    const rim = detailMaterial('paving', 0xbfb8a8, { box: true, key: 'rim' });
+    for (const o of map.obstacles) if (o.part === 'pond') this.box(o.x, o.y, o.z, o.w, o.h, o.d, rim);
+    this.nature = this.scenery ? new Nature(map, this.scenery) : null;
+    const boundary = detailMaterial('concrete', 0x8f9a92, { box: true, key: 'boundary' });
+    for (const z of [-L.z, L.z]) this.box(0, 1, z, L.x * 2, 2, 0.25, boundary);
+    for (const x of [-L.x, L.x]) this.box(x, 1, 0, 0.25, 2, L.z * 2, boundary);
   }
   batchStatic() {
     this.terrain.updateMatrixWorld(true);
     const batches = new Map(),
       remove = [];
+    // Merged per material and per 128 m chunk: few draw calls, and chunks out of view are frustum-culled.
     this.terrain.traverse((o) => {
       if (!o.isMesh || o.userData.ownedTexture || o.userData.standalone || o.userData.props || Array.isArray(o.material)) return;
-      const geo = o.geometry.clone().applyMatrix4(o.matrixWorld);
-      const key = o.material.uuid + ':' + Object.keys(geo.attributes).sort().join(',') + ':' + !!geo.index;
+      const geo = o.geometry.clone().applyMatrix4(o.matrixWorld),
+        chunk = Math.floor(o.position.x / 128) + ':' + Math.floor(o.position.z / 128);
+      const key = o.material.uuid + ':' + Object.keys(geo.attributes).sort().join(',') + ':' + !!geo.index + ':' + chunk;
       if (!batches.has(key)) batches.set(key, { material: o.material, geometries: [] });
       batches.get(key).geometries.push(geo);
       remove.push(o);
@@ -500,7 +442,9 @@ export class View {
       const geometry = mergeGeometries(b.geometries);
       if (geometry) {
         const m = new T.Mesh(geometry, b.material);
-        m.castShadow = true;
+        geometry.computeBoundingBox();
+        // Flat things (roads, pavements, paint, kerbs, floors) cast no shadow worth a draw call.
+        m.castShadow = geometry.boundingBox.max.y - geometry.boundingBox.min.y > 0.5;
         m.receiveShadow = true;
         m.userData.batched = true;
         this.terrain.add(m);
@@ -842,10 +786,7 @@ export class View {
     for (const id of changed.decor) this.scenery.hideDecor(id);
     for (const id of changed.wrecks) this.scenery.wreck(id, this.burning.has(id) ? this.fx : null);
     for (const id of changed.props || []) {
-      for (const { mesh, index } of this.propSlots?.get(id) || []) {
-        mesh.setMatrixAt(index, new T.Matrix4().makeScale(0, 0, 0));
-        mesh.instanceMatrix.needsUpdate = true;
-      }
+      this.nature?.hide(id);
       this.scenery.hideProp(id);
     }
     for (const id of changed.roofs || []) {
@@ -949,9 +890,19 @@ export class View {
     return m;
   }
   updateLoot(state, dt) {
+    // Chests are instanced (two draw calls for the map); dropped loot keeps its own spinning model and beam.
+    this.chestField ??= new ChestField(this.scene);
+    const culler = this.scenery?.culler,
+      cam = this.camera.position,
+      far = (this.viewDistance || 250) + 20;
+    this.chestField.update(
+      (state.chests || []).filter((c) => c.kind !== 'drop'),
+      dt,
+      (c) => Math.hypot(c.x - cam.x, c.z - cam.z) > far || !!culler?.hides(c.x, c.y || 0, (c.y || 0) + 1.3, c.z),
+    );
     const chestIds = new Set();
     for (const c of state.chests || []) {
-      if (c.kind === 'drop' && c.opened) continue;
+      if (c.kind !== 'drop' || c.opened) continue;
       chestIds.add(c.id);
       let v = this.chestViews.get(c.id);
       if (!v) {
@@ -1012,7 +963,11 @@ export class View {
   update(state, id, dt, menu = false, look = { angle: 0, pitch: 0 }) {
     this.adapt(menu);
     this.lastState = state;
+    WORLD.time.value = (WORLD.time.value + dt) % 3600;
+    // A new match on the same map starts with fewer destroyed things than this view shows: rebuild the world.
+    if (state.destruction && this.map?.applied && destructionCount(state.destruction) < this.appliedCount) this.map = null;
     this.setWorld(state.seed || DEFAULT_SEED, state.size);
+    if (state.destruction) this.appliedCount = destructionCount(state.destruction);
     if (this.lastRound !== state.round) {
       this.fx.reset(this.map);
       this.lastRound = state.round;
@@ -1104,8 +1059,12 @@ export class View {
         v.finish = look.finish;
         v.pattern = look.pattern;
       }
+      // Characters behind a solid building are not drawn (the occlusion horizon of the scenery).
       v.root.visible =
-        (menu || p.id !== id) && !p.inBus && Math.hypot(p.x - this.camera.position.x, p.z - this.camera.position.z) < (this.viewDistance || 250);
+        (menu || p.id !== id) &&
+        !p.inBus &&
+        Math.hypot(p.x - this.camera.position.x, p.z - this.camera.position.z) < (this.viewDistance || 250) &&
+        !(this.scenery?.culler.hides(p.x, p.y || 0, (p.y || 0) + 2.4, p.z) ?? false);
       v.root.position.lerp(
         new T.Vector3(p.x, p.y || 0, p.z),
         Math.hypot(v.root.position.x - p.x, v.root.position.z - p.z) > 8 ? 1 : weight,
@@ -1191,7 +1150,8 @@ export class View {
         this.people.delete(pid);
       }
     this.syncWorld(state, dt);
-    this.scenery?.cull(this.camera.position.x, this.camera.position.z, this.viewDistance || 250);
+    this.scenery?.cull(this.camera, this.viewDistance || 250);
+    this.grass?.update(this.camera, state.players);
     this.scenery?.update(dt, this.fx);
     for (const c of this.chimneys) {
       if (c.b.collapsed) continue;
@@ -1309,6 +1269,18 @@ export class View {
       }
     }
   }
+  // Compiles every material's shaders for the target the frame really renders into (the composer's buffer when
+  // post-processing is on), so the first match frame does not stall.
+  async precompile() {
+    const target = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this.composer ? this.composer.readBuffer : null);
+    try {
+      await this.renderer.compileAsync(this.scene, this.camera);
+      await this.renderer.compileAsync(this.weaponScene, this.weaponCamera);
+    } finally {
+      this.renderer.setRenderTarget(target);
+    }
+  }
   // View distance: fog, the camera's far plane, the shadow box and scenery culling all follow it.
   setViewDistance(d = 250) {
     this.viewDistance = Math.max(80, Math.min(600, Number(d) || 250));
@@ -1320,7 +1292,7 @@ export class View {
     const box = Math.min(145, Math.max(70, this.viewDistance * 0.6));
     Object.assign(this.sun.shadow.camera, { left: -box, right: box, top: box, bottom: -box });
     this.sun.shadow.camera.updateProjectionMatrix();
-    this.scenery?.cull(this.camera.position.x, this.camera.position.z, this.viewDistance, true);
+    this.scenery?.cull(this.camera, this.viewDistance, true);
   }
   // Render resolution as a share of the display's (capped) pixel ratio: lower is faster, softer.
   setResolution(scale = 1) {
@@ -1343,6 +1315,9 @@ export class View {
     this.quality = quality;
     const lite = quality === 'fast' || (quality === 'auto' && matchMedia('(pointer:coarse)').matches);
     this.fx?.setQuality(lite);
+    setSurfaceQuality(lite);
+    this.grass?.setQuality(lite);
+    if (this.scenery) this.scenery.culler.lite = lite;
     this.basePixelRatio = Math.min(devicePixelRatio, lite ? 1 : 1.5);
     this.renderer.setPixelRatio(this.basePixelRatio * (this.resolution || 1) * (this.dynamicScale ?? 1));
     const shadowSize = lite ? 1024 : 2048;

@@ -1699,15 +1699,6 @@ async function boot() {
     view = new View($('#game'));
     view.setGrade(grade);
     applyVideo();
-    // Compile every material's shaders during loading, so the first match frame does not stall.
-    $('#loadStatus').textContent = 'Preparing shaders…';
-    try {
-      await view.renderer.compileAsync(view.scene, view.camera);
-      await view.renderer.compileAsync(view.weaponScene, view.weaponCamera);
-    } catch {}
-    view.setCosmetics(profile.equipped);
-    updateWallet();
-    renderLoadoutSummary();
     try {
       const q = localStorage.getItem('blockyard-quality');
       if (['auto', 'fast', 'quality'].includes(q)) {
@@ -1715,6 +1706,14 @@ async function boot() {
         view.setQuality(q);
       }
     } catch {}
+    // Compile every material's shaders during loading, so the first match frame does not stall.
+    $('#loadStatus').textContent = 'Preparing shaders…';
+    try {
+      await view.precompile();
+    } catch {}
+    view.setCosmetics(profile.equipped);
+    updateWallet();
+    renderLoadoutSummary();
     sim = new Arena({ bots: 9, seed: mapSeed });
     const p = sim.addPlayer('you', 'YOU');
     p.cosmetics = { ...profile.equipped };

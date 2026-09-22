@@ -601,34 +601,38 @@ export class CombatEffects {
       this.tracerMesh.setMatrixAt(i, d.matrix);
     }
     this.tracerMesh.instanceMatrix.needsUpdate = true;
+    // Live debris is packed into the first slots, so an idle pool draws nothing.
+    let live = 0;
     for (let i = 0; i < this.debris.length; i++) {
       const p = this.debris[i];
-      d.scale.setScalar(0);
-      if (p) {
-        p.life -= dt;
-        if (p.life <= 0) this.debris[i] = null;
-        else {
-          p.vy -= 14 * dt;
-          p.x += p.vx * dt;
-          p.y += p.vy * dt;
-          p.z += p.vz * dt;
-          const floor = groundHeight(p.x, p.z, this.map) + p.size;
-          if (p.y < floor) {
-            p.y = floor;
-            p.vy = Math.abs(p.vy) * 0.22;
-            p.vx *= 0.6;
-            p.vz *= 0.6;
-          }
-          p.rotation += p.spin * dt;
-          d.position.set(p.x, p.y, p.z);
-          d.rotation.set(p.rotation, p.rotation * 0.7, p.rotation * 0.3);
-          d.scale.setScalar(p.size * Math.min(1, p.life * 4));
-          this.debrisMesh.setColorAt(i, this.color.setHex(p.color).multiplyScalar(p.shade || 1));
-        }
+      if (!p) continue;
+      p.life -= dt;
+      if (p.life <= 0) {
+        this.debris[i] = null;
+        continue;
       }
+      p.vy -= 14 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      const floor = groundHeight(p.x, p.z, this.map) + p.size;
+      if (p.y < floor) {
+        p.y = floor;
+        p.vy = Math.abs(p.vy) * 0.22;
+        p.vx *= 0.6;
+        p.vz *= 0.6;
+      }
+      p.rotation += p.spin * dt;
+      d.position.set(p.x, p.y, p.z);
+      d.rotation.set(p.rotation, p.rotation * 0.7, p.rotation * 0.3);
+      d.scale.setScalar(p.size * Math.min(1, p.life * 4));
       d.updateMatrix();
-      this.debrisMesh.setMatrixAt(i, d.matrix);
+      this.debrisMesh.setMatrixAt(live, d.matrix);
+      this.debrisMesh.setColorAt(live, this.color.setHex(p.color).multiplyScalar(p.shade || 1));
+      live++;
     }
+    d.rotation.set(0, 0, 0);
+    this.debrisMesh.count = live;
     this.debrisMesh.instanceMatrix.needsUpdate = true;
     if (this.debrisMesh.instanceColor) this.debrisMesh.instanceColor.needsUpdate = true;
     for (let i = 0; i < this.marks.length; i++) {

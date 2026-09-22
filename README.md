@@ -1,4 +1,4 @@
-# PRIDA — Mini Royale 0.8
+# PRIDA
 
 A low-poly browser FPS by Mark Pridachin. English interface, desktop mouse/keyboard and touch controls. Built with Three.js, Rapier and Vite. Includes an optional authoritative Node WebSocket server.
 
@@ -10,6 +10,13 @@ A low-poly browser FPS by Mark Pridachin. English interface, desktop mouse/keybo
 - **Private groups:** up to 10 humans. Create a group, copy its invitation link, or enter a friend's code. The host starts Mini Royale or Arena. Empty places are filled with bots so the starting roster is exactly 10. Groups are free-for-all, not teams. Lobby ownership transfers if the host leaves; an in-match disconnect becomes a bot. Mid-match joins are refused with an explanation. After a match, the host can replay with the same group or return everyone to its lobby.
 
 The published static Site and the CrazyGames ZIP do **not** include a running multiplayer service. Online play (quick match Big City Royale and Duel, private groups) needs the included `server.mjs` deployed once, see **Free online server** below. Offline modes work immediately. This client requires the matching PRIDA 0.13 server.
+
+## World rendering and performance (0.20)
+
+- **Surfaces:** every surface is physically based, with colour, normal and ambient-occlusion/roughness/metalness maps (CC0 Poly Haven sets, 512 px), projected in world space so batched and instanced geometry needs no UVs. Buildings get brick, plaster or concrete-panel facades with cornices, plinths, sills and lintels; interiors are painted plaster. The sky (with procedural clouds) is captured into an environment map, so glass, cars, metal and water reflect it.
+- **Roofs:** procedural per building category (`src/roofs.js`): gable and hip roofs with clay or slate tiles and chimneys for homes, flat roofs with parapets and rooftop plant, shed and saw-tooth factory roofs, smokestacks. They break and fall with the building.
+- **Nature:** procedural broadleaf and pine trees with alpha-tested leaf cards that sway, bushes, ferns, flowers, reeds, rocks, cacti, logs and hay bales (`src/nature.js`), and instanced 3D grass around the camera that bends away from players (`src/grass.js`). Collapsed buildings leave rubble heaps (`src/rubble.js`).
+- **Visibility:** instances are grouped (a building's shell, one storey of one building, a 16 m cell outside) and only visible groups are uploaded (`src/culling.js`): view range, a widened frustum that keeps off-screen shadows, and an occlusion horizon built from intact buildings, with gaps where doors and windows line up. Furniture is drawn only on the storeys you can see into. Models are single-sided. Static ground, roads and roofs are chunked so off-screen chunks are skipped. A busy street renders about a tenth of the triangles of 0.19.
 
 ## World and combat
 
