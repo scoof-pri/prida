@@ -965,6 +965,9 @@ function hud(dt) {
   $('#health').textContent = Math.ceil(p.hp);
   $('#healthBar').style.width = p.hp + '%';
   $('#healthBar').style.background = p.hp < 35 ? '#f5a56c' : '#a6e4c4';
+  $('#shieldValue').textContent = Math.ceil(p.shieldHP || 0);
+  $('#shieldBar').style.width = (p.shieldHP || 0) + '%';
+  $('#shieldBar').style.background = '#69b9ff';
   $('#ammo').textContent = w.melee ? '—' : (item?.ammo ?? 0);
   $('#maxAmmo').textContent = w.melee ? ' MELEE' : ' / ' + (item?.reserve ?? 0);
   $('#weaponName').textContent = rarityName(p.rarity) + ' · ' + w.name;
@@ -1139,7 +1142,7 @@ function updateInventoryHUD(p) {
       e.querySelector('b').textContent = item ? slotLabel(item) : i === 0 ? 'MELEE' : 'EMPTY';
     });
   }
-  $('#armorLabel').textContent = `ARMOR ${p.armor} · MEDKITS ${p.medkits}`;
+  $('#armorLabel').textContent = `SHIELD ${Math.ceil(p.shieldHP || 0)} · ARMOR ${p.armor} · MEDKITS ${p.medkits}`;
   const near = (state.chests || []).filter(
     (c) => !c.opened && Math.hypot(c.x - p.x, c.z - p.z) < 2.8 && lineClear(p, c, 0, view.map.obstacles),
   )[0];
@@ -1165,7 +1168,7 @@ function updateInventoryHUD(p) {
       : 'Paused. Equipment lasts until the match ends.';
   const gear = p.gear && GEAR.find((g) => g.id === p.gear.id);
   $('#supplyText').textContent =
-    `Medkits: ${p.medkits} / 5 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'}`;
+    `Medkits: ${p.medkits} / 5 · Shield: ${Math.ceil(p.shieldHP || 0)} / 100 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'}`;
   $('#healBtn').disabled = p.medkits === 0 || p.hp >= 100;
   const key = JSON.stringify([p.slots, p.slot]);
   if (key !== inventoryKey) {

@@ -28,6 +28,17 @@ export function rawHeight(x, z, map) {
     const r2 = ((x - h.x) ** 2 + (z - h.z) ** 2) / (h.radius * h.radius);
     if (r2 < 1) y += h.height * (1 - r2) ** 2;
   }
+  // Superellipse shoreline: most of the old Big City stays untouched, then a beach shelf rolls down
+  // into deep water near the enlarged map boundary. Rendering and Rapier use this same height.
+  if (map.island) {
+    const { rx, rz } = map.island,
+      n = Math.pow((Math.abs(x) / rx) ** 4 + (Math.abs(z) / rz) ** 4, 0.25);
+    if (n > 0.965) {
+      const t = Math.min(1, (n - 0.965) / 0.09),
+        smooth = t * t * (3 - 2 * t);
+      y -= 7 * smooth;
+    }
+  }
   return y;
 }
 export function groundHeight(x, z, map) {
@@ -94,6 +105,10 @@ export function terrainRay(origin, dir, range, map) {
   return Infinity;
 }
 export function biomeAt(x, z, map) {
+  if (map.island) {
+    const n = Math.pow((Math.abs(x) / map.island.rx) ** 4 + (Math.abs(z) / map.island.rz) ** 4, 0.25);
+    if (n > 0.98) return 'coast';
+  }
   const zone = map.parks?.find((p) => Math.abs(x - p.x) < p.w / 2 - 2 && Math.abs(z - p.z) < p.d / 2 - 2);
   return zone?.type || 'city';
 }

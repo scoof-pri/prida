@@ -373,6 +373,7 @@ export class Arena {
       cooldown: 0,
       respawn: 0,
       shield: 2,
+      shieldHP: 0,
       moving: 0,
       shot: 0,
       stamina: 100,
@@ -498,6 +499,7 @@ export class Arena {
     p.hp = p.bot ? 80 : 100;
     p.respawn = 0;
     p.shield = 2;
+    p.shieldHP = 0;
     p.slots = loadoutSlots(p.loadout);
     p.slot = 1;
     this.syncHeld(p);
@@ -1173,6 +1175,10 @@ export class Arena {
       if (!item) continue;
       if (w.spinup) p.spin = clamp(p.spin + (i.fire && !p.reload ? dt : -dt * 1.5) / w.spinup, 0, 1);
       // MOMENTUM (STRENGTH 10): one reload in three is over before it starts.
+      if (w.remote && i.reload && !p.reload && this.detonateCharges(p)) {
+        p.cooldown = Math.max(p.cooldown, 0.2);
+        continue;
+      }
       const reloadTime = () => {
         if (p.perks?.momentum && this.random() < 0.3) {
           this.events.push({ type: 'momentum', id: p.id });
@@ -1319,6 +1325,19 @@ export class Arena {
       this.alert(p, w);
     }
   }
+  detonateCharges(p) {
+    let count = 0;
+    for (let n = this.projectiles.length - 1; n >= 0; n--) {
+      const r = this.projectiles[n];
+      if (r.owner !== p.id || r.kind !== 'c4') continue;
+      const w = weaponStats(r.weapon, r.rarity);
+      this.blast(r.x, r.y, r.z, w.radius, w.damage, p, 'c4');
+      this.projectiles.splice(n, 1);
+      count++;
+    }
+    if (count) this.events.push({ type: 'remote', id: p.id, count });
+    return count;
+  }
   shoot(p) {
     const item = this.held(p),
       w = weaponStats(p.weapon, p.rarity);
@@ -1341,7 +1360,7 @@ export class Arena {
         dx: dir.x,
         dy: dir.y,
         dz: dir.z,
-        life: (w.range / w.speed) * (w.gravity ? 2 : 1),
+        life: w.remote ? 999 : w.fuse ?? (w.range / w.speed) * (w.gravity ? 2 : 1),
         weapon: p.weapon,
         rarity: p.rarity,
         kind: w.projectile,
@@ -1451,6 +1470,7 @@ export class Arena {
       reserve: contents.loot?.reserve,
       medkits: contents.medkits || 0,
       armor: contents.armor || 0,
+      shield: contents.shield || 0,
       gear: contents.gear || null,
       opened: false,
       by,
@@ -1489,6 +1509,7 @@ export class Arena {
     restockAmmo(p);
     p.medkits = Math.min(5, p.medkits + (c.medkits || 0));
     p.armor = Math.min(100, p.armor + (c.armor || 0));
+    p.shieldHP = Math.min(100, (p.shieldHP || 0) + (c.shield || 0));
     let oldGear = null;
     if (c.gear && p.gear?.id !== c.gear) {
       oldGear = p.gear?.id || null;
@@ -1529,10 +1550,14 @@ export class Arena {
     // (Damage-over-time comes in fractions of a point, so this must not round.)
     amount = amount * (attacker && attacker !== victim ? attacker.perks?.damage || 1 : 1) * (victim.perks?.taken || 1);
     if (amount <= 0) return;
+    const shielded = Math.min(victim.shieldHP || 0, amount);
+    victim.shieldHP = Math.max(0, (victim.shieldHP || 0) - shielded);
+    amount -= shielded;
+    victim.healing = 0;
+    if (amount <= 0) return;
     const absorbed = Math.min(victim.armor, Math.round(amount * 0.5));
     victim.armor -= absorbed;
     victim.hp = Math.max(0, victim.hp - amount + absorbed);
-    victim.healing = 0;
     if (victim.hp === 0) {
       victim.respawn = this.respawns ? 3 : 0;
       victim.deaths++;
@@ -1616,6 +1641,7 @@ export class Arena {
     for (let n = this.projectiles.length - 1; n >= 0; n--) {
       const r = this.projectiles[n],
         w = weaponStats(r.weapon, r.rarity);
+      if (r.stuck) continue;
       if (w.gravity) r.vy -= w.gravity * dt;
       const speed = Math.hypot(r.vx, r.vy, r.vz) || 1,
         dir = { x: r.vx / speed, y: r.vy / speed, z: r.vz / speed },
@@ -1654,7 +1680,25 @@ export class Arena {
       r.z += dir.z * distance;
       r.life -= dt;
       if (bossHit && !w.radius) this.bosses.damage(bossHit.boss, w.damage, owner);
-      if (Math.abs(r.x) > this.map.limit.x || Math.abs(r.z) > this.map.limit.z || r.y < -1) impact = true;
+      if (Math.abs(r.x) > this.map.limit.x || Math.abs(r.z) > this.map.limit.z || r.y < -7) impact = true;
+      if (w.remote && impact && r.life > 0) {
+        r.stuck = true;
+        r.vx = r.vy = r.vz = 0;
+        this.events.push({ type: 'impact', x: r.x, y: r.y, z: r.z, weapon: r.weapon, hit: false, impact: cast.impact });
+        continue;
+      }
+      if (w.bounce && impact && r.life > 0) {
+        const normal = cast.impact || { x: 0, y: 1, z: 0 },
+          dot = r.vx * normal.x + r.vy * normal.y + r.vz * normal.z,
+          keep = 0.68;
+        r.vx = (r.vx - 2 * dot * normal.x) * keep;
+        r.vy = (r.vy - 2 * dot * normal.y) * keep;
+        r.vz = (r.vz - 2 * dot * normal.z) * keep;
+        r.x += (normal.x || 0) * 0.04;
+        r.y += (normal.y || 0) * 0.04;
+        r.z += (normal.z || 0) * 0.04;
+        continue;
+      }
       if (!impact && r.life > 0) continue;
       if (w.radius) this.explode(r, w, owner);
       else {

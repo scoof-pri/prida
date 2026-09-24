@@ -1,0 +1,44 @@
+name: PRIDA review workspace
+on:
+  push:
+    branches: [feature/island-combat-021]
+    paths: [.github/workflows/prida-review.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - name: Package workspace
+        run: |
+          mkdir -p /tmp/prida-review
+          tar --exclude='./dist' -czf /tmp/prida-review/workspace.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prida-review-workspace
+          path: /tmp/prida-review/
+          retention-days: 3
+      - name: Test baseline
+        continue-on-error: true
+        run: timeout 360 npm test > /tmp/prida-tests.txt 2>&1
+      - name: Build baseline
+        continue-on-error: true
+        run: npm run build > /tmp/prida-build.txt 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prida-baseline-results
+          path: |
+            /tmp/prida-tests.txt
+            /tmp/prida-build.txt
+          retention-days: 3
