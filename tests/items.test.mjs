@@ -27,8 +27,9 @@ function place(a, p, x, z, y = 0.02) {
   a.world.step();
 }
 
-test('catalog: 17 weapons incl. 3 melee, 5 rarities, jetpack and glider', () => {
-  assert.equal(WEAPONS.length, 17);
+test('catalog: 19 weapons incl. grenade, C4, 3 melee, 5 rarities, jetpack and glider', () => {
+  assert.equal(WEAPONS.length, 19);
+  assert.deepEqual(WEAPONS.slice(-2).map((w) => w.name), ['GRENADE', 'C4']);
   assert.deepEqual(
     WEAPONS.filter((w) => w.melee).map((w) => w.name),
     ['FANG', 'SPADE', 'RONIN'],
