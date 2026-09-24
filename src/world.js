@@ -56,23 +56,27 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
   const { cols: C, rows: R, parks: PARKS, biomes: BIOMES } = MAP_SIZES[size],
     X0 = -C * 12,
     Z0 = -R * 13,
-    limit = { x: C * 12 + 8, z: R * 13 + 10 };
+    landLimit = { x: C * 12 + 8, z: R * 13 + 10 },
+    // Big City now sits inside a larger island. The populated 0.20 world remains in the centre,
+    // while the extra terrain becomes coast and ocean instead of stretching the street grid.
+    limit = size === 'city' ? { x: 520, z: 460 } : landLimit;
   const rand = seededRandom(seed),
     map = {
       seed,
       size,
       grid: { cols: C, rows: R, x0: X0, z0: Z0 },
       limit,
+      landLimit,
       buildings: [],
       obstacles: [],
       cover: [],
       chests: [],
       spawns: [
         [0, 0],
-        [0, limit.z - 12],
-        [0, -limit.z + 12],
-        [-limit.x + 4, 0],
-        [limit.x - 4, 0],
+        [0, landLimit.z - 12],
+        [0, -landLimit.z + 12],
+        [-landLimit.x + 4, 0],
+        [landLimit.x - 4, 0],
       ],
       trees: [],
       flora: [],
@@ -91,6 +95,12 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
       decor: [],
       trash: [],
     };
+  if (size === 'city') {
+    map.island = { rx: 470, rz: 420, water: -0.28 };
+    // One ocean plane runs under the island. Terrain height falls below it only near the coast,
+    // so the existing city, wilderness and roads remain dry while the enlarged map reads as an island.
+    map.waters.push({ x: 0, z: 0, w: limit.x * 2 - 4, d: limit.z * 2 - 4, y: map.island.water, ocean: true });
+  }
   const keepOut = [],
     levelKeepOut = [];
   const { buildings, obstacles, chests, spawns, trees, parks, hills, roads, paths, waters, rocks, plots } = map,
