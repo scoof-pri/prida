@@ -86,6 +86,7 @@ export function rollChest(rand, tier = 'chest', weapon = rollWeapon(rand)) {
     loot: { w: weapon, r: WEAPONS[weapon].melee ? Math.min(MAX_RARITY, r + 1) : r },
     medkits: rand() < (tier === 'chest' ? 0.35 : 0.7) ? 1 : 0,
     armor: tier === 'supply' ? 25 : tier === 'park' ? 20 : 15,
+    shield: tier === 'supply' ? 40 : tier === 'park' ? 30 : 20,
     gear:
       rand() < (tier === 'supply' ? 0.25 : tier === 'park' ? 0.16 : 0.07)
         ? GEAR[Math.floor(rand() * GEAR.length)].id
