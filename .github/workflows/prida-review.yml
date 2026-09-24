@@ -14,26 +14,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: npm ci
-      - name: Test baseline
-        continue-on-error: true
-        run: npm test > /tmp/prida-tests.txt 2>&1
-      - name: Build baseline
-        continue-on-error: true
-        run: npm run build > /tmp/prida-build.txt 2>&1
       - name: Package workspace
-        if: always()
         run: |
           mkdir -p /tmp/prida-review
-          cp /tmp/prida-tests.txt /tmp/prida-review/ 2>/dev/null || true
-          cp /tmp/prida-build.txt /tmp/prida-review/ 2>/dev/null || true
           tar --exclude='./dist' -czf /tmp/prida-review/workspace.tar.gz .
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: prida-review-workspace
           path: /tmp/prida-review/
+          retention-days: 3
+      - name: Test baseline
+        continue-on-error: true
+        run: timeout 360 npm test > /tmp/prida-tests.txt 2>&1
+      - name: Build baseline
+        continue-on-error: true
+        run: npm run build > /tmp/prida-build.txt 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prida-baseline-results
+          path: |
+            /tmp/prida-tests.txt
+            /tmp/prida-build.txt
           retention-days: 3
