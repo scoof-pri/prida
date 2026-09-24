@@ -878,12 +878,17 @@ export class View {
       m.userData.spin = d;
     } else {
       const geometry =
-        r.kind === 'grenade'
-          ? new T.IcosahedronGeometry(0.09, 0)
-          : r.kind === 'bolt'
-            ? new T.CylinderGeometry(0.015, 0.015, 0.55, 5)
-            : new T.ConeGeometry(0.09, 0.45, 6);
-      m = new T.Mesh(geometry, this.mat(r.kind === 'grenade' ? 0x57704a : r.kind === 'bolt' ? 0x8a6a45 : 0xffc47e));
+        r.kind === 'grenade' || r.kind === 'handgrenade'
+          ? new T.IcosahedronGeometry(r.kind === 'handgrenade' ? 0.13 : 0.09, 0)
+          : r.kind === 'c4'
+            ? new T.BoxGeometry(0.24, 0.08, 0.18)
+            : r.kind === 'bolt'
+              ? new T.CylinderGeometry(0.015, 0.015, 0.55, 5)
+              : new T.ConeGeometry(0.09, 0.45, 6);
+      m = new T.Mesh(
+        geometry,
+        this.mat(r.kind === 'c4' ? 0x4c5148 : r.kind === 'grenade' || r.kind === 'handgrenade' ? 0x57704a : r.kind === 'bolt' ? 0x8a6a45 : 0xffc47e),
+      );
       m.userData.ownGeometry = true;
     }
     this.scene.add(m);
