@@ -2,7 +2,16 @@
 
 All assets below were downloaded from their authors' public distribution links on 2026-09-17. Their source pages identify the packs as CC0. Copies of Kenney's supplied license notices are in `licenses/`. No assets are fetched from these sites during gameplay.
 
+## Quaternius — Universal Base Characters and Universal Animation Library 1 & 2 (CC0), 0.22–0.27
+
+The combat operators built from these packs (op-male.glb, op-female.glb, op-anims.glb) were the player and bot models
+from 0.22 to 0.27 and are no longer shipped: since 0.27.1 the toon soldiers below are back. scripts/prepare-operators.mjs
+can rebuild them from the free "Standard" downloads (https://quaternius.itch.io).
+
 ## Quaternius — Toon Shooter Game Kit (CC0)
+
+The three toon characters (soldier.glb, hazmat.glb, scout.glb) are the player and bot models (up to 0.21.2, and again
+since 0.27.1), with their own animation clips and the guns in their hands; the weapon models below were cut from them.
 
 Source: https://quaternius.com/packs/toonshootergamekit.html
 Author's download: https://drive.google.com/drive/folders/1-BDs_EIyd6uiF2XuoyiZEcqnMQIJrE0C
@@ -49,7 +58,7 @@ Sources: https://kenney.nl/assets/furniture-kit · https://kenney.nl/assets/car-
 
 Source: https://polyhaven.com (licence: https://polyhaven.com/license — CC0). Each set was downloaded at 1K and resized to 512 px JPEG as three maps: colour (`<name>.jpg`), OpenGL normal map (`<name>_n.jpg`) and ambient occlusion / roughness / metalness (`<name>_arm.jpg`), by `scripts/fetch-textures.py`. Asset → game name:
 
-brick_4 → bricks · painted_plaster_wall → plaster · brushed_concrete → concrete · asphalt_02 → asphalt · square_brick_paving → paving · forrest_ground_01 → grass · brown_mud_leaves_01 → dirt · coast_sand_01 → sand · floor_tiles_06 → tiles · laminate_floor_02 → wood · grey_roof_tiles_02 → roof · metal_plate → metal · bark_brown_02 → bark · rock_boulder_dry → rock · clay_roof_tiles_02 → claytiles · corrugated_iron_02 → corrugated · tarred_gravel → gravel · rough_linen → fabric · oak_veneer_01 → oak · concrete_wall_008 → panels · concrete_pavement → sidewalk · pine_bark → pinebark.
+brick_4 → bricks · painted_plaster_wall → plaster · brushed_concrete → concrete · asphalt_02 → asphalt · square_brick_paving → paving · forrest_ground_01 → grass · brown_mud_leaves_01 → dirt · coast_sand_01 → sand · floor_tiles_06 → tiles · laminate_floor_02 → wood · grey_roof_tiles_02 → roof · bark_brown_02 → bark · rock_boulder_dry → rock · clay_roof_tiles_02 → claytiles · corrugated_iron_02 → corrugated · tarred_gravel → gravel · rough_linen → fabric · oak_veneer_01 → oak · concrete_wall_008 → panels · concrete_pavement → sidewalk · pine_bark → pinebark.
 
 They replace the ambientCG colour maps used from 0.8 to 0.19 (Grass004, Ground037, Ground054, Asphalt012, PavingStones070, Plaster001, Bricks059, WoodFloor051, Concrete034, Tiles012).
 
@@ -57,10 +66,22 @@ They replace the ambientCG colour maps used from 0.8 to 0.19 (Grass004, Ground03
 
 Source: https://ambientcg.com (licence: https://docs.ambientcg.com/license/ — CC0). LeafSet024 (beech leaves) and LeafSet019 (thuja sprays), 1K PNG colour and opacity, composed into the foliage cards `leaves.webp` and `needles.webp` by `scripts/make-foliage.py`.
 
+## ambientCG metals, CC0 (0.24)
+
+Source: https://ambientcg.com (licence: https://docs.ambientcg.com/license/ — CC0). Metal038 (scratched steel) → steel, Metal029 (black powder-coated steel) → gunmetal, Metal046B (dark dirty metal) → worn; 1K JPG colour, OpenGL normal, roughness and metalness, resized to 512 px and packed like the Poly Haven sets by `scripts/fetch-textures.py`. They give weapons, gear, cars, street props, the chest, the battle bus, furniture metal and the bosses' metal their surfaces (replacing Poly Haven metal_plate, used 0.20–0.23).
+
 ## Game-authored work
 
-Map generation, first-floor architecture, parks and terrain, trees and rocks, collision proxies, navigation, HUD, inventory, radar, rules, projectile and loot systems, procedural first-person motion, lighting and shader effects, pooled combat particles and synthesized sound. Wall panels, windows, curtains, doors, rubble, trash bags, destruction, haze and fire effects are game-authored. 0.20: roofs (gable, hip, flat with parapets and rooftop plant, shed, saw-tooth), chimneys and smokestacks, facade bands, plinths, sills and lintels, window frames and glass, trees, bushes, ferns, flowers, reeds, cacti, logs, hay bales, rocks, 3D grass, rubble heaps, the sky and clouds, and all surface shaders are procedural and game-authored. Weapon icons are software renders of the attributed models above. 0.7: katana.glb, crossbow.glb, minigun.glb, jetpack.glb and glider.glb are game-authored low-poly models built from primitives in scripts/procedural-models.js.
+Map generation, first-floor architecture, parks and terrain, trees and rocks, collision proxies, navigation, HUD, inventory, radar, rules, projectile and loot systems, procedural first-person motion, lighting and shader effects, pooled combat particles and synthesized sound. Wall panels, windows, curtains, doors, rubble, trash bags, destruction, haze and fire effects are game-authored. 0.20.1: the C4 charge; 0.20.3: the ballistic shield and the three grenades (`scripts/procedural-models.js`). 0.20.2: all five boss creatures and their animation. 0.20: roofs (gable, hip, flat with parapets and rooftop plant, shed, saw-tooth), chimneys and smokestacks, facade bands, plinths, sills and lintels, window frames and glass, trees, bushes, ferns, flowers, reeds, cacti, logs, hay bales, rocks, 3D grass, rubble heaps, the sky and clouds, and all surface shaders are procedural and game-authored. Weapon icons are software renders of the attributed models above. 0.7: katana.glb, crossbow.glb, minigun.glb, jetpack.glb and glider.glb are game-authored low-poly models built from primitives in scripts/procedural-models.js.
 
 ## Quaternius — RobotExpressive (CC0 1.0)
 
-Boss bodies (`models/boss.glb`): "RobotExpressive" by Tomás Laulhé (Quaternius), modifications by Don McCurdy, as shipped in the three.js examples (https://github.com/mrdoob/three.js/tree/r180/examples/models/gltf/RobotExpressive). CC0 1.0. Recoloured and fitted with extra parts at runtime.
+Boss bodies used this rig up to 0.20.1: "RobotExpressive" by Tomás Laulhé (Quaternius), modifications by Don McCurdy, as shipped in the three.js examples (https://github.com/mrdoob/three.js/tree/r180/examples/models/gltf/RobotExpressive). CC0 1.0.
+
+Since 0.20.2 the bosses are game-authored creatures (`src/boss-models.js`) with procedural animation, and `models/boss.glb` is no longer loaded.
+
+## Game-authored item models (0.27)
+
+fists, shieldcell, shieldkeg, bandage, overcharge, serum, rush, stim, impulse, sticky, launchpad, coverwall and campfire
+(`public/models/*.glb` and their icons) are built by the game's own code from three.js primitives
+(`scripts/procedural-models.js`, exported by `scripts/build-weapon-assets.mjs`). No third-party assets.
