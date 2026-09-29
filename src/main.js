@@ -5,16 +5,21 @@ import { relativeMove } from './combat.js';
 import './style.css';
 import { Arena, initPhysics } from './simulation.js';
 import { View } from './render.js';
+import { glSupport, glAdvice } from './gl-help.js';
 import { WEAPONS, DEFAULT_SEED } from './world.js';
 import { initSDK, gameplay, portalStorage, portalInvite, portalRoom, portalJoin } from './sdk.js';
-import { BRANCHES, NODES, ABILITY_AT, ranksIn, rankCost, buyRank, packSkills, levelOf, maxLevel } from './skills.js';
-import { COSMETICS, KINDS, itemsOfKind, pack as packCosmetics, freshProfile, readProfile, buyOrEquip, rewardMatch, PASS_TIERS, PASS_TIER_XP, passTier } from './cosmetics.js';
+import { BRANCHES, NODES, ABILITY_AT, ranksIn, rankCost, buyRank, packSkills, levelOf, maxLevel, perks as skillPerks } from './skills.js';
+import { COSMETICS, KINDS, itemsOfKind, pack as packCosmetics, freshProfile, readProfile, buyOrEquip, rewardMatch, PASS_TIERS, PASS_TIER_XP, passTier, COSMETIC_RARITIES, cosmeticRarity } from './cosmetics.js';
 import { roomCode, newRoomCode, inviteURL, validEndpoint } from './party.js';
-import { RARITIES, GEAR } from './catalog.js';
-import { LOADOUT_CHOICES, sanitizeLoadout, encodeLoadout, weaponStats } from './items.js';
+import { RARITIES, GEAR, ARMOR_TIERS } from './catalog.js';
+import { encodeLoadout, weaponStats, carryWeight } from './items.js';
+import { Mirror, Interpolator, Predictor } from './netcode.js';
+import { lobbySpot } from './lobby-stage.js';
 import { Minimap } from './minimap.js';
+import { DamageNumbers, feedLine } from './hud-fx.js';
+import { Tutorial } from './tutorial.js';
 import { hostGroup, joinGroup } from './p2p.js';
-import { BOSSES, RELICS } from './bosses.js';
+import { BOSSES, RELICS, MOVE_LABELS } from './bosses.js';
 import { GRADE_FIELDS, GRADE_PRESETS, DEFAULT_GRADE, sanitizeGrade, startingGrade } from './grading.js';
 // Map colours for parks and wild biomes (inventory map and minimap).
 const ZONE_COLORS = {
@@ -55,6 +60,12 @@ let profile = freshProfile(),
   connectedEndpoint = '',
   lastPacket = 0,
   latency = 0;
+// Online (netcode.js, 0.28): chests and destruction arrive as deltas, others are shown slightly in the past between
+// two states, and your own walking is predicted from your inputs.
+const mirror = new Mirror(),
+  interp = new Interpolator(90),
+  predictor = new Predictor();
+let lastSt = 0;
 let cheatUnlocked = false,
   cheatBuffer = '',
   flyUp = false,
@@ -65,10 +76,13 @@ const cheatSettings = { flight: false, infinite: false, god: false, bazooka: fal
 const BAZOOKA_CODE = '112358';
 let inventoryOpen = false,
   interact = false,
+  detonate = false,
   heal = false,
   emote = false,
   dash = false,
   aiming = false;
+// Third person by default; a saved choice wins.
+let cameraView = 'third';
 let mapSeed = DEFAULT_SEED,
   jump = false,
   sprintTouch = false,
@@ -106,6 +120,89 @@ function beep(weapon = 0, hitSound = false) {
     o.stop(audio.currentTime + 0.12);
   } catch {}
 }
+// A few notes: item sips and chimes, the launch pad, the impulse whoosh, chests opening.
+function tones(notes, { type = 'sine', vol = 0.035, gap = 0.07, dur = 0.16, slide = 1 } = {}) {
+  if (!sound || !audio) return;
+  try {
+    notes.forEach((f, i) => {
+      const o = audio.createOscillator(),
+        g = audio.createGain(),
+        t = audio.currentTime + i * gap;
+      o.type = type;
+      o.frequency.setValueAtTime(f, t);
+      if (slide !== 1) o.frequency.exponentialRampToValueAtTime(f * slide, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(audio.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    });
+  } catch {}
+}
+// Ambience (0.27): the bus engine's drone while aboard, the wind in free fall and under the glider.
+const amb = {};
+function ambience(p) {
+  if (!audio) return;
+  try {
+    if (!amb.hum) {
+      const hum = audio.createGain(),
+        low = audio.createBiquadFilter();
+      low.type = 'lowpass';
+      low.frequency.value = 220;
+      hum.gain.value = 0;
+      for (const f of [54, 56.5, 109]) {
+        const o = audio.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = f;
+        o.connect(low);
+        o.start();
+      }
+      low.connect(hum).connect(audio.destination);
+      // Wind: a second of looping noise through a band-pass filter.
+      const buf = audio.createBuffer(1, audio.sampleRate, audio.sampleRate),
+        data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      const noise = audio.createBufferSource(),
+        band = audio.createBiquadFilter(),
+        wind = audio.createGain();
+      noise.buffer = buf;
+      noise.loop = true;
+      band.type = 'bandpass';
+      band.frequency.value = 520;
+      band.Q.value = 0.6;
+      wind.gain.value = 0;
+      noise.connect(band).connect(wind).connect(audio.destination);
+      noise.start();
+      Object.assign(amb, { hum, wind, band });
+    }
+    const alive = !!p && p.hp > 0 && sound && mode !== 'menu' && !paused,
+      hum = alive && p.inBus ? 0.05 : 0,
+      wind = alive && p.dropping && !p.gliding ? 0.11 : alive && p.gliding ? 0.045 : alive && p.launched ? 0.06 : 0;
+    amb.hum.gain.setTargetAtTime(hum, audio.currentTime, 0.25);
+    amb.wind.gain.setTargetAtTime(wind, audio.currentTime, 0.25);
+    amb.band.frequency.setTargetAtTime(p?.gliding ? 380 : 620, audio.currentTime, 0.4);
+  } catch {}
+}
+// Two soft rising notes when a friend invites you.
+function playInviteSound() {
+  if (!sound || !audio) return;
+  try {
+    [660, 880].forEach((f, i) => {
+      const o = audio.createOscillator(),
+        g = audio.createGain(),
+        t = audio.currentTime + i * 0.13;
+      o.type = 'sine';
+      o.frequency.setValueAtTime(f, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.05, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      o.connect(g).connect(audio.destination);
+      o.start(t);
+      o.stop(t + 0.22);
+    });
+  } catch {}
+}
 function unlockAudio() {
   if (!audio)
     try {
@@ -117,6 +214,7 @@ function clearInput() {
   flyUp = false;
   flyDown = false;
   interact = false;
+  detonate = false;
   heal = false;
   emote = false;
   dash = false;
@@ -138,6 +236,29 @@ const rarityColor = (r) => RARITIES[r]?.color || RARITIES[0].color;
 function me() {
   return state?.players.find((p) => p.id === id);
 }
+// First or third person: the camera swings behind your shoulder and your own character is drawn.
+function applyCameraView(save = true) {
+  view?.setThirdPerson(cameraView === 'third');
+  if ($('#cameraView')) $('#cameraView').value = cameraView;
+  if (save)
+    try {
+      localStorage.setItem('prida-camera', cameraView);
+    } catch {}
+}
+function toggleCameraView() {
+  cameraView = cameraView === 'third' ? 'first' : 'third';
+  applyCameraView();
+  toast(cameraView === 'third' ? 'THIRD PERSON · T' : 'FIRST PERSON · T');
+}
+// The debug sandbox runs only in a local match (never online, never on the server).
+function debugging() {
+  return mode === 'training' && sim?.mode === 'debug';
+}
+// Is the local player holding a remote charge (C4)?
+function holdingCharge() {
+  const p = me();
+  return !!p && p.hp > 0 && !!WEAPONS[p.weapon]?.sticky;
+}
 function selectSlot(n) {
   const p = me();
   if (mode === 'menu' || !p?.slots?.[n]) return;
@@ -152,60 +273,66 @@ function cycleSlot(step) {
     if (p.slots[n]) return selectSlot(n);
   }
 }
-// ---- Pre-match loadout (lobby) -------------------------------------------------------------------
-const LOADOUT_ROWS = [
-  ['melee', 'MELEE', 'Always in slot 1. Quick, silent, no ammunition.'],
-  ['primary', 'PRIMARY', 'Your main gun, slot 2.'],
-  ['secondary', 'SECONDARY', 'Backup weapon, slot 3.'],
-  ['gear', 'GEAR', 'Worn on the back. Hold jump in the air.'],
+// ---- The items guide (lobby, 0.27) ---------------------------------------------------------------
+// Nobody chooses a loadout any more: everyone drops in with bare hands. The ITEMS tab lists what can be found.
+const GUIDE_ROWS = [
+  ['primary', 'PRIMARY WEAPONS', 'Rifles, shotguns, SMGs and the heavy machine gun.', (w) => w.category === 'primary'],
+  ['secondary', 'SIDEARMS', 'Pistols, revolvers and throwing blades.', (w) => w.category === 'secondary' && !w.fuse],
+  ['power', 'POWER WEAPONS', 'Rare finds: long range, explosives, the minigun.', (w) => w.category === 'power' && !w.fuse && !w.sticky],
+  ['melee', 'MELEE', 'Silent, no ammunition. Bare hands until you find a blade.', (w) => w.melee],
+  ['throw', 'THROWABLES', 'Grenades and charges: throw with the fire button.', (w) => (w.fuse || w.sticky) && !w.consumable],
+  ['items', 'SHIELDS AND HEALS', 'Hold them in your hands and press fire to use. Switching away cancels.', (w) => w.consumable && !w.deploy],
+  ['deploy', 'DEPLOYABLES', 'Set down in front of you.', (w) => w.deploy],
 ];
 function statLine(w) {
+  if (w.fists) return 'What everyone starts with';
+  if (w.desc) return w.desc;
   if (w.melee) return `${w.damage} dmg · ${w.range.toFixed(1)} m reach`;
   if (w.mag === 1) return `${w.damage} dmg · single shot · ${w.reserve} spare`;
   return `${w.damage}${w.pellets > 1 ? '×' + w.pellets : ''} dmg · ${w.mag} mag · ${Math.round(60 / w.interval)} rpm`;
 }
-function loadoutCard(key, value, selected) {
-  if (key === 'gear') {
-    const g = GEAR.find((g) => g.id === value);
-    return `<button class="kit-choice ${selected ? 'selected' : ''}" data-kit="${key}" data-value="${value}"><span class="kit-art">${g ? `<img src="./icons/${g.model}.png" alt="">` : '<i>—</i>'}</span><b>${g ? g.name : 'NO GEAR'}</b><small>${g ? g.desc : 'Travel light.'}</small></button>`;
-  }
-  const w = WEAPONS[value];
-  return `<button class="kit-choice ${selected ? 'selected' : ''}" data-kit="${key}" data-value="${value}"><span class="kit-art"><img src="./icons/${w.model}.png" alt=""></span><b>${w.name}</b><small>${w.ru} · ${statLine(w)}</small></button>`;
+function guideCard(i) {
+  const w = WEAPONS[i],
+    r = w.rarity !== undefined ? `<em style="color:${rarityColor(w.rarity)}">${rarityName(w.rarity)}</em> · ` : '';
+  return `<button class="kit-choice" data-kit="weapon" data-value="${i}" style="--rarity:${w.rarity !== undefined ? rarityColor(w.rarity) : 'transparent'}"><span class="kit-art"><img src="./icons/${w.model}.png" alt=""></span><b>${w.name}</b><small>${r}${w.ru} · ${statLine(w)}</small></button>`;
 }
+function gearCard(g) {
+  return `<button class="kit-choice" data-kit="gear" data-value="${g.id}"><span class="kit-art"><img src="./icons/${g.model}.png" alt=""></span><b>${g.name}</b><small>${g.desc}</small></button>`;
+}
+// The play tab shows a few highlights; any of them opens the full list.
 function renderLoadoutSummary() {
-  const l = profile.loadout;
-  $('#loadoutSummary').innerHTML = LOADOUT_ROWS.map(([key, label]) => {
-    const v = l[key],
-      g = key === 'gear' ? GEAR.find((g) => g.id === v) : null,
-      icon = key === 'gear' ? (g ? g.model : null) : WEAPONS[v].model;
-    return `<button class="kit-slot" data-open-loadout="${key}"><small>${label}</small>${icon ? `<img src="./icons/${icon}.png" alt="">` : '<i>—</i>'}<b>${key === 'gear' ? (g ? g.name : 'NONE') : WEAPONS[v].name}</b></button>`;
-  }).join('');
+  const picks = ['fists', 'rifle', 'shieldcell', 'shieldkeg', 'launchpad', 'sticky', 'coverwall', 'overcharge'].map((m) => WEAPONS.findIndex((w) => w.model === m));
+  $('#loadoutSummary').innerHTML = picks
+    .map((i) => `<button class="kit-slot" data-open-loadout="${i}" style="--rarity:${rarityColor(WEAPONS[i].rarity ?? 0)}"><small>${WEAPONS[i].fists ? 'START' : WEAPONS[i].consumable ? 'ITEM' : 'WEAPON'}</small><img src="./icons/${WEAPONS[i].model}.png" alt=""><b>${WEAPONS[i].name}</b></button>`)
+    .join('');
   document.querySelectorAll('[data-open-loadout]').forEach((e) => (e.onclick = () => setTab('loadout')));
 }
 function renderLoadoutPanel() {
-  const l = profile.loadout;
-  $('#loadoutRows').innerHTML = LOADOUT_ROWS.map(
-    ([key, label, note]) =>
-      `<section class="kit-row"><header><b>${label}</b><small>${note}</small></header><div class="kit-grid">${LOADOUT_CHOICES[key].map((v) => loadoutCard(key, v, l[key] === v)).join('')}</div></section>`,
-  ).join('');
-  document.querySelectorAll('[data-kit]').forEach(
-    (e) =>
-      (e.onclick = () => {
-        const key = e.dataset.kit,
-          value = key === 'gear' ? e.dataset.value : +e.dataset.value;
-        refreshProfile();
-        profile.loadout = sanitizeLoadout({ ...profile.loadout, [key]: value });
-        saveProfile();
-        renderLoadoutPanel();
-        renderLoadoutSummary();
-        if (socket?.readyState === 1 && group?.phase === 'lobby')
-          socket.send(JSON.stringify({ type: 'loadout', value: encodeLoadout(profile.loadout) }));
-      }),
-  );
+  $('#loadoutRows').innerHTML =
+    GUIDE_ROWS.map(([key, label, note, pick]) => {
+      const list = WEAPONS.flatMap((w, i) => (pick(w) ? [i] : []));
+      return `<section class="kit-row" data-row="${key}"><header><b>${label}</b><small>${note}</small></header><div class="kit-grid">${list.map(guideCard).join('')}</div></section>`;
+    }).join('') +
+    `<section class="kit-row"><header><b>GEAR</b><small>Worn on the back or the arm. Found in chests.</small></header><div class="kit-grid">${GEAR.map(gearCard).join('')}</div></section>` +
+    `<section class="kit-row"><header><b>RELICS</b><small>Dropped by the four bosses of the wilds. They take their own place in your belt: F and G use them, and they drop if you fall.</small></header><div class="kit-grid">${Object.values(RELICS)
+      .map((r) => `<div class="kit-choice relic-card" style="--rarity:#${r.color.toString(16).padStart(6, '0')}"><span class="kit-art"><i class="gem"></i></span><b>${r.name}</b><small>${BOSSES[r.boss].name} · ${r.abilities.map((a) => a.label).join(' · ')}</small></div>`)
+      .join('')}</div></section>`;
+  // Pointing at a weapon, an item or gear puts it on the character on the stage.
+  document.querySelectorAll('[data-kit]').forEach((e) => {
+    const key = e.dataset.kit,
+      value = key === 'gear' ? e.dataset.value : +e.dataset.value;
+    e.onpointerenter = e.onfocus = e.onclick = () => {
+      if (key === 'gear') lobby.gear = value;
+      else lobby.weapon = value;
+    };
+    e.onpointerleave = e.onblur = () => {
+      lobby.weapon = lobby.gear = null;
+    };
+  });
 }
-$('#weaponBar').innerHTML = [0, 1, 2, 3, 4]
-  .map((i) => `<button data-slot="${i}"><span>${i + 1}</span><img alt=""><b></b></button>`)
-  .join('');
+// The five slots; the relic a boss dropped has its own place after them (0.27, in the page): F / G use it.
+$('#weaponBar').insertAdjacentHTML('afterbegin', [0, 1, 2, 3, 4].map((i) => `<button data-slot="${i}"><span>${i + 1}</span><img alt=""><b></b></button>`).join(''));
+if (touch) $('#relicSlot span').textContent = 'RELIC';
 document.querySelectorAll('[data-slot]').forEach((e) => (e.onclick = () => selectSlot(+e.dataset.slot)));
 function begin(m) {
   closePanel();
@@ -234,30 +361,39 @@ function begin(m) {
     state.mode === 'royale'
       ? (state.size === 'city' ? 'BIG CITY · ' : 'MINI ROYALE · ') + (m === 'online' ? 'ONLINE' : 'SOLO')
       : state.mode === 'duel'
-        ? 'DUEL · 1 V 1'
+        ? state.size === 'city'
+          ? 'DUEL · BIG CITY'
+          : 'DUEL · 1 V 1'
       : m === 'online'
         ? 'ARENA · ' + (group?.code || '')
         : state.mode === 'survival'
           ? 'SURVIVAL · ONE LIFE'
-          : 'TRAINING · BOTS';
+          : state.mode === 'tutorial'
+            ? 'TUTORIAL'
+            : state.mode === 'debug'
+              ? 'SANDBOX'
+              : 'TRAINING · BOTS';
   slot = player?.slot ?? 1;
   lastSlot = 0;
   inventoryKey = '';
   show('#netStatus', m === 'online');
   $('#connectionStatus').textContent = '';
   $('#feed').replaceChildren();
+  damageNumbers.clear();
   gameplay(true);
   captureMouse();
 }
 function train(kind = $('#gameMode').value) {
   disconnect();
   clearTimeout(connectionTimer);
+  tutorial?.dispose();
+  tutorial = null;
   sim?.dispose();
   soloKind = kind;
   const city = kind === 'royale-city',
     mode = city ? 'royale' : kind;
   sim = new Arena({
-    bots: city ? 23 : mode === 'royale' ? 9 : 16,
+    bots: city ? 23 : mode === 'royale' ? 9 : mode === 'debug' || mode === 'tutorial' ? 0 : 16,
     seed: mapSeed,
     mode,
     size: city ? 'city' : 'district',
@@ -270,10 +406,85 @@ function train(kind = $('#gameMode').value) {
   sim.setSkills(p, profile.skills);
   id = 'you';
   applyCheats();
+  if (mode === 'tutorial') {
+    tutorial = new Tutorial(sim, 'you', touch);
+    try {
+      localStorage.setItem('prida-tutorial', 'seen');
+    } catch {}
+  }
   state = sim.snapshot();
   begin('training');
+  renderTutorial();
 }
 $('#train').onclick = () => train();
+// ---- Tutorial (0.27) ------------------------------------------------------------------------------
+let tutorial = null,
+  tutorialKey = '';
+function renderTutorial(advanced = false) {
+  const t = mode === 'training' && tutorial ? tutorial.view() : null;
+  show('#tutorialPanel', !!t);
+  document.body.classList.toggle('tutorial', !!t);
+  if (!t) return;
+  const key = t.id + t.index;
+  if (key !== tutorialKey) {
+    tutorialKey = key;
+    $('#tutStep').textContent = t.finished ? 'TUTORIAL COMPLETE' : `STEP ${t.index + 1} / ${t.count - 1}`;
+    $('#tutTitle').textContent = t.title;
+    $('#tutText').textContent = t.text;
+    $('#tutFill').style.width = (t.index / (t.count - 1)) * 100 + '%';
+    show('#tutDone', t.finished);
+    show('#tutSkip', !t.finished);
+    const el = $('#tutorialPanel');
+    el.classList.remove('advance');
+    void el.offsetWidth;
+    if (advanced) el.classList.add('advance');
+    if (t.finished) {
+      try {
+        localStorage.setItem('prida-tutorial', 'done');
+      } catch {}
+      releaseMouse();
+      gameplay(false);
+    }
+  }
+}
+function tutorialStep(events, dt) {
+  if (!tutorial) return;
+  if (tutorial.update(dt, events)) {
+    tones([660, 880, 1175], { vol: 0.035, gap: 0.06, dur: 0.2 });
+    renderTutorial(true);
+  }
+}
+$('#tutSkip').onclick = () => {
+  tutorial?.skip();
+  renderTutorial(true);
+  captureMouse();
+};
+$('#tutRoyale').onclick = () => {
+  $('#gameMode').value = 'royale';
+  $('#gameMode').dispatchEvent(new Event('change'));
+  train('royale');
+};
+$('#tutLobby').onclick = () => leave();
+// First visit: offer the tutorial in the lobby, once.
+function offerTutorial() {
+  let seen = null;
+  try {
+    seen = localStorage.getItem('prida-tutorial');
+  } catch {}
+  $('#tutorialOffer').hidden = !!seen;
+}
+$('#tutStart').onclick = () => {
+  $('#tutorialOffer').hidden = true;
+  unlockAudio();
+  train('tutorial');
+};
+$('#tutNo').onclick = () => {
+  $('#tutorialOffer').hidden = true;
+  try {
+    localStorage.setItem('prida-tutorial', 'declined');
+  } catch {}
+};
+$('#infoTutorial').onclick = () => train('tutorial');
 $('#gameMode').onchange = () => {
   const k = $('#gameMode').value;
   $('#modeDescription').textContent =
@@ -283,9 +494,23 @@ $('#gameMode').onchange = () => {
         ? 'The big city, 8× the district: you + 23 bots, a slower zone. Last survivor wins.'
       : k === 'survival'
         ? 'You against 16 bots. One life each.'
-        : 'First to 10 eliminations. Respawns enabled.';
+        : k === 'debug'
+          ? 'Sandbox for testing: no storm, no timer, every weapon and item on tap (J). No rewards.'
+          : k === 'tutorial'
+            ? 'A two-minute walk-through: moving, bare hands, chests, shooting, shields, the launch pad.'
+            : 'First to 10 eliminations. Respawns enabled.';
   $('#train span').textContent =
-    k === 'royale' ? 'MINI ROYALE · 10 CONTENDERS' : k === 'royale-city' ? 'BIG CITY · 24 CONTENDERS' : k === 'survival' ? 'SURVIVAL · 16 BOTS' : 'TRAINING · RESPAWNS ON';
+    k === 'royale'
+      ? 'MINI ROYALE · 10 CONTENDERS'
+      : k === 'royale-city'
+        ? 'BIG CITY · 24 CONTENDERS'
+        : k === 'survival'
+          ? 'SURVIVAL · 16 BOTS'
+          : k === 'debug'
+            ? 'DEBUG · SANDBOX'
+            : k === 'tutorial'
+              ? 'TUTORIAL · THE BASICS'
+              : 'TRAINING · RESPAWNS ON';
 };
 $('#newMap').onclick = () => {
   if (socket) return;
@@ -318,7 +543,7 @@ function disconnect() {
   setConnecting(false);
 }
 function setConnecting(on) {
-  $('#createGroup').disabled = $('#joinGroup').disabled = $('#quickRoyale').disabled = $('#quickDuel').disabled = on;
+  $('#createGroup').disabled = $('#joinGroup').disabled = $('#quickRoyale').disabled = $('#quickDuel').disabled = $('#quickDuelCity').disabled = on;
   for (const el of ['nickname', 'room', 'partyMode', 'endpoint']) $('#' + el).disabled = on;
 }
 // Server address: typed by the player, set in config.json, or — when the page is served by the PRIDA server
@@ -332,6 +557,11 @@ function serverEndpoint() {
   if (typed && typed !== 'auto') return typed;
   if (config.multiplayerUrl === 'auto') return own;
   return config.multiplayerUrl || (local ? own : '');
+}
+// Only your own inventory comes from the server (`self.slots`); everyone else's stays there.
+function ownSlots(st, self) {
+  for (const p of st.players || []) p.slots = p.id === id ? self?.slots || [] : p.slots || [];
+  return st;
 }
 function connectGroup(create = false, queue = null) {
   if (socket) return;
@@ -365,8 +595,9 @@ function connectGroup(create = false, queue = null) {
     url.searchParams.set('skills', packSkills(profile.skills));
     // Private groups play directly between browsers by default (the host's computer runs the match); the server
     // only introduces them. Quick match always goes through the server.
-    const direct = !queue && $('#directMode').checked && typeof RTCPeerConnection === 'function',
-      params = {
+    const direct = !queue && $('#directMode').checked && typeof RTCPeerConnection === 'function';
+    groupDirect = direct;
+    const params = {
         name: $('#nickname').value.slice(0, 16) || 'PLAYER',
         cos: packCosmetics(profile.equipped),
         loadout: encodeLoadout(profile.loadout),
@@ -403,7 +634,11 @@ function connectGroup(create = false, queue = null) {
         id = msg.id;
         sim?.dispose();
         sim = null;
-        state = msg.state;
+        mirror.reset();
+        interp.reset();
+        predictor.reset();
+        lastSt = 0;
+        state = ownSlots(mirror.apply(msg.state), msg.self);
         group = msg.group;
         $('#connectionStatus').textContent = msg.group?.public
           ? 'Connected. Waiting for players…'
@@ -412,15 +647,21 @@ function connectGroup(create = false, queue = null) {
       }
       if (msg.type === 'state') {
         const previous = group?.phase,
-          previousMatch = group?.match,
-          last = state;
-        // Unchanged chests / destruction are left out by the server; keep the copies we have.
-        for (const key of ['chests', 'destruction']) if (!(key in msg.state) && last?.[key]) msg.state[key] = last[key];
-        const mine = msg.self && msg.state.players.find((p) => p.id === id);
-        if (mine) mine.slots = msg.self.slots;
-        for (const p of msg.state.players) p.slots ||= [];
+          previousMatch = group?.match;
+        // Chests and destruction come as changes against what we already have (the mirror keeps the full copy).
+        ownSlots(mirror.apply(msg.state), msg.self);
+        // Over the lossy direct link a state can arrive after a newer one: its events still count, its picture not.
+        if (Number.isFinite(msg.state.st) && msg.state.st < lastSt) {
+          for (const event of msg.events || []) handleEvent(event);
+          return;
+        }
+        lastSt = msg.state.st || 0;
+        interp.push(msg.state);
+        const mine = msg.state.players.find((p) => p.id === id);
+        if (mine && view?.map) predictor.server(mine, msg.self?.ack, view.map, predictCtx(mine));
         state = msg.state;
-        group = msg.group;
+        // The group only comes when it changes.
+        if ('group' in msg) group = msg.group;
         renderGroup();
         if (
           group?.phase === 'playing' &&
@@ -456,6 +697,7 @@ function connectGroup(create = false, queue = null) {
 $('#createGroup').onclick = () => connectGroup(true);
 $('#quickRoyale').onclick = () => connectGroup(false, 'royale-city');
 $('#quickDuel').onclick = () => connectGroup(false, 'duel');
+$('#quickDuelCity').onclick = () => connectGroup(false, 'duel-city');
 $('#joinGroup').onclick = () => connectGroup(false);
 $('#disconnectGroup').onclick = () => {
   disconnect();
@@ -477,8 +719,8 @@ function renderGroup() {
     $('#groupMembers').append(li);
   }
   $('#groupFill').textContent =
-    group.mode === 'duel'
-      ? `${group.members.length} / 2 players · first to 5 eliminations`
+    group.mode === 'duel' || group.mode === 'duel-city'
+      ? `${group.members.length} / 2 players · first to 5 eliminations${group.mode === 'duel-city' ? ' · inside the ring' : ''}`
       : `${group.members.length} players + ${group.bots} bots = ${group.contenders} contenders`;
   if (group.public) {
     $('#groupFill').textContent +=
@@ -489,6 +731,7 @@ function renderGroup() {
   $('#startGroup').disabled = group.host !== id;
   $('#startGroup').textContent = group.host === id ? 'START MATCH' : 'WAITING FOR HOST';
   if (!group.public) $('#partyMode').value = group.mode;
+  renderGroupFriends();
   portalRoom(group, connectedEndpoint);
 }
 $('#copyInvite').onclick = async () => {
@@ -522,7 +765,11 @@ function lobbyShell() {
 }
 function leave() {
   disconnect();
+  tutorial?.dispose();
+  tutorial = null;
   lobbyShell();
+  show('#tutorialPanel', false);
+  offerTutorial();
   sim?.dispose();
   sim = new Arena({ bots: 9, seed: mapSeed });
   const p = sim.addPlayer('you', 'YOU');
@@ -614,6 +861,8 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyH' && !e.repeat) heal = true;
   if (e.code === 'KeyB' && !e.repeat) emote = true;
   if (e.code === 'KeyV' && !e.repeat) dash = true;
+  if (e.code === 'KeyJ' && !e.repeat && debugging()) openPanel('debugPanel');
+  if (e.code === 'KeyT' && !e.repeat) toggleCameraView();
   if (e.code === 'Space' && !e.repeat) jump = true;
   if (/^Digit[1-5]$/.test(e.code)) selectSlot(+e.code.slice(-1) - 1);
   if (e.code === 'KeyQ' && !e.repeat) selectSlot(lastSlot);
@@ -661,27 +910,38 @@ document.addEventListener('pointerlockchange', () => {
   if (hadLock && !locked && canLook()) pause(true);
   hadLock = locked;
 });
+// Touch look drags use pointer events; mouse buttons use mousedown/mouseup. Pointer events only report the first
+// button of a chord (a second button pressed while one is held arrives as a pointermove), so aiming with the right
+// button and then firing with the left never fired, and letting go of the aim while firing left it stuck on.
 $('#game').addEventListener('pointerdown', (e) => {
-  if (!canLook()) return;
-  if (e.pointerType === 'touch') {
-    if (lookPointer === null && e.clientX > innerWidth * 0.35) {
-      lookPointer = e.pointerId;
-      lookInput.startDrag(e.pointerId, e.clientX, e.clientY);
-      $('#game').setPointerCapture(e.pointerId);
-    }
-    return;
+  if (!canLook() || e.pointerType !== 'touch') return;
+  if (lookPointer === null && e.clientX > innerWidth * 0.35) {
+    lookPointer = e.pointerId;
+    lookInput.startDrag(e.pointerId, e.clientX, e.clientY);
+    $('#game').setPointerCapture(e.pointerId);
   }
+});
+$('#game').addEventListener('mousedown', (e) => {
+  if (!canLook() || (touch && e.sourceCapabilities?.firesTouchEvents)) return;
   if (e.button === 2) {
-    aiming = true;
+    // A demolition charge has no sights: the aim button is its detonator.
+    if (holdingCharge()) detonate = true;
+    else aiming = true;
     return;
   }
   if (e.button !== 0) return;
   if (document.pointerLockElement !== $('#game')) {
     captureMouse();
     lookInput.startDrag('mouse', e.clientX, e.clientY);
-    $('#game').setPointerCapture(e.pointerId);
   }
   mouse.down = true;
+});
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 2) aiming = false;
+  if (e.button === 0) {
+    mouse.down = false;
+    lookInput.endDrag('mouse');
+  }
 });
 // Mouse relative movement has one source; pointermove handles touch only.
 window.addEventListener('mousemove', (e) => {
@@ -694,9 +954,9 @@ window.addEventListener('pointermove', (e) => {
     applyLook(lookInput.drag(e.pointerId, e.clientX, e.clientY));
 });
 window.addEventListener('pointerup', (e) => {
-  if (e.button === 2) aiming = false;
-  if (e.pointerType !== 'touch') {
-    mouse.down = false;
+  // The last mouse button let go: nothing can still be held (covers a mouseup lost outside the window).
+  if (e.pointerType === 'mouse' && e.buttons === 0) {
+    mouse.down = aiming = false;
     lookInput.endDrag('mouse');
   }
   if (e.pointerId === lookPointer) {
@@ -772,7 +1032,7 @@ $('#touchReload').onclick = () => (reload = true);
 $('#interactBtn').onclick = () => (interact = true);
 $('#emoteBtn').onclick = () => (emote = true);
 $('#dashBtn').onclick = () => (dash = true);
-$('#aimBtn').onclick = () => (aiming = !aiming);
+$('#aimBtn').onclick = () => (holdingCharge() ? (detonate = true) : (aiming = !aiming));
 $('#inventoryBtn').onclick = () => toggleInventory(true);
 $('#closeInventory').onclick = () => toggleInventory(false);
 $('#healBtn').onclick = () => {
@@ -809,12 +1069,14 @@ function input() {
     move.x + (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
   const forward =
     -move.z + (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
-  const world = relativeMove(right, forward, angle);
+  const world = relativeMove(right, forward, angle),
+    // Third person: fire from the eye at what the crosshair is on, not parallel to the camera (render.js, aim.js).
+    fix = view?.aimFix;
   return {
     x: canLook() ? world.x : 0,
     z: canLook() ? world.z : 0,
-    angle,
-    pitch,
+    angle: fix ? Math.atan2(Math.sin(angle + fix.angle), Math.cos(angle + fix.angle)) : angle,
+    pitch: fix ? Math.max(-1.35, Math.min(1.35, pitch + fix.pitch)) : pitch,
     fire: canLook() && (touch ? fireTouch : mouse.down),
     reload: !paused && reload,
     jump: canLook() && jump,
@@ -823,6 +1085,7 @@ function input() {
         (flyDown || keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight') ? 1 : 0)
       : 0,
     interact: canLook() && interact,
+    detonate: canLook() && detonate,
     heal: canLook() && heal,
     emote: canLook() && emote,
     dash: canLook() && dash,
@@ -846,17 +1109,51 @@ function handleEvent(e) {
   }
   if (e.type === 'crit' && e.id === id) toast(e.cyber ? 'CYBER STRIKE · ONE-SHOT' : 'ONE-SHOT · TITAN GLOVES', '#e0a33c');
   if (e.type === 'momentum' && e.id === id) toast('MOMENTUM · INSTANT RELOAD', '#7fd6f0');
+  // Items (0.27).
+  if (e.type === 'use-start' && e.id === id) tones([420, 470], { vol: 0.02, dur: 0.1 });
+  if (e.type === 'use' && e.id === id) {
+    const w = WEAPONS[e.item];
+    if (!w.deploy) toast(`${w.name} · ${ITEM_DONE(w)}`, w.color);
+    tones(w.deploy ? [180, 140] : [660, 990], { type: w.deploy ? 'square' : 'sine', vol: w.deploy ? 0.025 : 0.035, dur: w.deploy ? 0.12 : 0.2 });
+  }
+  if (e.type === 'use-blocked' && e.id === id) {
+    toast(e.why, '#ffb070');
+    tones([220], { type: 'square', vol: 0.02, dur: 0.1 });
+  }
+  if (e.type === 'deploy' && e.id === id) toast({ pad: 'LAUNCH PAD SET · STEP ON IT', wall: 'COVER WALL UP', fire: 'CAMPFIRE LIT · STAND CLOSE TO HEAL' }[e.kind] || 'SET DOWN', '#c9b6ff');
+  if (e.type === 'pad' && e.id === id) tones([260, 520], { slide: 2.2, dur: 0.3, vol: 0.04, gap: 0.05 });
+  if (e.type === 'impulse') {
+    const p = me(),
+      d = p ? Math.hypot(p.x - e.x, p.z - e.z) : 99;
+    if (d < 30) tones([520], { type: 'sawtooth', slide: 0.25, dur: 0.4, vol: 0.035 * (1 - d / 30) });
+  }
+  if (e.type === 'stick' && e.on === id) toast('A CLINGER IS STUCK TO YOU · RUN', '#ff8b3d');
+  if (e.type === 'armor-break' && e.id === id) {
+    tones([880, 440], { type: 'triangle', vol: 0.03, gap: 0.05, dur: 0.14 });
+    $('#vignette').style.boxShadow = 'inset 0 0 120px #4fa8ffaa';
+    setTimeout(() => ($('#vignette').style.boxShadow = ''), 200);
+  }
+  if (e.type === 'chest-refill' && mode !== 'menu') {
+    const p = me();
+    if (p && Math.hypot(p.x - e.x, p.z - e.z) < 12) toast('A CHEST NEARBY IS FULL AGAIN', '#ffe7a0');
+  }
   if (e.type === 'dash' && e.id === id) beep(1);
   if (e.type === 'crit' && e.victim === id) toast('KILLED BY THE TITAN GLOVES', '#e0a33c');
-  if (e.type === 'ability' && e.id === id && e.ability === 'cataclysm') toast('CATACLYSM · HALF THE MAP COMES APART', '#38e0b0');
-  if (e.type === 'ability' && e.id === id && e.ability === 'rift') toast('LINE OF RUIN', '#38e0b0');
-  if (e.type === 'flashback' && e.id === id) toast('FLASHBACK · YOUR SIGHT IS STUCK IN THE PAST FOR 5 s', '#e9d3ad');
-  if (e.type === 'flashback' && e.by === id) toast('FLASHBACK CAST', '#c08cff');
   if (e.type === 'ability' && e.id === id && e.ability === 'summon') toast('TWO HELPER BOTS JOIN YOU FOR 25 s', '#ffb070');
+  if (e.type === 'ability' && e.id === id && e.ability === 'freeze') toast('FROST NOVA · EVERYONE AROUND YOU FREEZES', '#8fe3ff');
+  if (e.type === 'ability' && e.id === id && e.ability === 'venom') toast('VENOM POOL', '#9bd84a');
+  if (e.type === 'ability' && e.id === id && e.ability === 'eruption') toast('ERUPTION · A LINE OF STONE SPIKES', '#d08a3a');
+  // A boss close by starts a signature move: name it, so there is a moment to get out of the marked ground.
+  if (e.type === 'boss-move') {
+    const p = state.players.find((q) => q.id === id);
+    if (p && p.hp > 0 && Math.hypot(p.x - e.x, p.z - e.z) < 40) bossWarning(`${BOSSES[e.kind].name} · ${MOVE_LABELS[e.move] || e.move.toUpperCase()}`, BOSSES[e.kind].color);
+  }
   if (e.type === 'loot' && e.id === id) {
     const parts = [];
-    if (e.weapon !== null) parts.push(`${rarityName(e.rarity)} ${WEAPONS[e.weapon].name} · ${WEAPONS[e.weapon].ru}`);
+    if (e.weapon !== null) parts.push(`${WEAPONS[e.weapon].consumable ? '' : rarityName(e.rarity) + ' '}${WEAPONS[e.weapon].name} · ${WEAPONS[e.weapon].ru}`);
+    if (e.extra !== null && e.extra !== undefined) parts.push(e.extraTaken ? '+ ' + WEAPONS[e.extra].name : WEAPONS[e.extra].name + ' ON THE GROUND');
     if (e.gear) parts.push(GEAR.find((g) => g.id === e.gear)?.name + ' EQUIPPED');
+    if (e.tier && e.tier !== 'drop') tones(e.tier === 'legendary' ? [523, 659, 784, 1047] : [587, 740, 880], { vol: 0.03, gap: 0.06, dur: 0.18 });
     toast(parts.length ? parts.join(' · ') : 'SUPPLIES RESTOCKED', e.weapon !== null ? rarityColor(e.rarity) : null);
   }
   if (e.type === 'melee' && e.id === id) {
@@ -877,16 +1174,32 @@ function handleEvent(e) {
   }
   if (e.type === 'kill') {
     const a = state.players.find((p) => p.id === e.by) || state.bosses?.find((b) => b.id === e.by),
-      b = state.players.find((p) => p.id === e.victim);
-    let line = document.createElement('div');
-    line.textContent = `${a?.name || 'Player'}  →  ${b?.name || 'Player'}`;
+      b = state.players.find((p) => p.id === e.victim),
+      weapon = a && e.by !== e.victim && WEAPONS[e.weapon],
+      line = feedLine(a?.name || 'Player', b?.name || 'Player', weapon ? `./icons/${weapon.model}.png` : null, e.by === id || e.victim === id);
     $('#feed').prepend(line);
-    while ($('#feed').children.length > 3) $('#feed').lastChild.remove();
-    setTimeout(() => line.remove(), 5000);
+    while ($('#feed').children.length > 4) $('#feed').lastChild.remove();
+    setTimeout(() => line.remove(), 6000);
   }
+  // Damage numbers for your own hits, on players and on bosses.
+  if (e.type === 'dmg' && e.by === id) damageNumbers.spawn({ ...e, big: state.players.find((p) => p.id === e.id)?.hp <= 0 }, view?.camera);
+  if (e.type === 'boss-hit' && e.by === id) damageNumbers.spawn({ id: e.id, n: e.amount, x: e.x, y: e.y, z: e.z }, view?.camera);
+}
+let bossWarnTimer;
+function bossWarning(text, color) {
+  const el = $('#bossWarn');
+  el.textContent = text;
+  el.style.color = '#' + color.toString(16).padStart(6, '0');
+  show('#bossWarn', true);
+  el.classList.remove('pulse');
+  void el.offsetWidth;
+  el.classList.add('pulse');
+  clearTimeout(bossWarnTimer);
+  bossWarnTimer = setTimeout(() => show('#bossWarn', false), 1800);
 }
 // Relic, boss, status and minimap HUD.
-const minimap = new Minimap($('#minimap'));
+const minimap = new Minimap($('#minimap')),
+  damageNumbers = new DamageNumbers($('#dmgLayer'));
 let minimapClock = 0;
 function extrasHud(p, dt) {
   const relic = p.relic && RELICS[p.relic.id];
@@ -937,12 +1250,39 @@ function extrasHud(p, dt) {
   show('#flashbackFx', fb);
   document.body.classList.toggle('flashback', fb);
   show('#frostFx', p.frozen > 0 && p.hp > 0);
+  // Caught in a web: strands over the view and a warning the first moment it happens.
+  const webbed = p.webbed > 0 && p.hp > 0;
+  show('#webFx', webbed);
+  if (webbed && !extrasHud.webbed) toast('WEBBED · YOU ARE SLOWED', '#9bd84a');
+  extrasHud.webbed = webbed;
+  // Speed lines while falling out of the bus or thrusting on the jetpack.
+  show('#speedFx', p.hp > 0 && ((!!p.dropping && !p.gliding) || !!p.thrusting));
+  $('#speedFx').classList.toggle('fall', !!p.dropping && !p.gliding);
   minimapClock += dt;
   if (minimapClock > 1 / 15 && view.map) {
     minimapClock = 0;
     minimap.setMap(view.map);
     minimap.draw(state, p, angle);
   }
+}
+// The ring under the crosshair while an item is used, and the buffs running (0.27).
+function itemHud(p) {
+  const u = p.hp > 0 && p.using ? p.using : null;
+  show('#useRing', !!u);
+  if (u) {
+    const k = 1 - u.t / (u.time || 1),
+      w = WEAPONS[u.w];
+    $('#useArc').style.strokeDashoffset = String(119.4 * (1 - k));
+    $('#useName').textContent = w?.name || '';
+    $('#useTime').textContent = u.t.toFixed(1) + ' s';
+    $('#useRing').style.setProperty('--rarity', w?.color || '#8fd0ff');
+  }
+  const chips = [];
+  if (p.rush > 0) chips.push(['rush', 'RUSH', p.rush]);
+  if (p.stim > 0) chips.push(['stim', 'STIM', p.stim]);
+  if (p.regen) chips.push(['regen', 'REGEN', p.regen.left / (p.regen.rate || 1)]);
+  const html = chips.map(([k, n, t]) => `<span class="buff ${k}">${n} <b>${Math.ceil(t)}</b></span>`).join('');
+  if ($('#buffs').innerHTML !== html) $('#buffs').innerHTML = html;
 }
 let lastHP = 100;
 function hud(dt) {
@@ -954,6 +1294,7 @@ function hud(dt) {
     sec = Math.ceil(state.time);
   // Follow slot changes made by the simulation (pickups, swaps).
   if (p.slots && !p.slots[slot]) slot = p.slot;
+  show('#debugBtn', debugging());
   const remaining = state.players.filter((o) => o.bot && o.hp > 0).length;
   $('#timer').textContent =
     state.mode === 'survival'
@@ -964,33 +1305,55 @@ function hud(dt) {
   $('#staminaText').textContent = p.sprinting ? 'SPRINT' : p.stamina < 25 ? 'REST' : 'STAMINA';
   $('#health').textContent = Math.ceil(p.hp);
   $('#healthBar').style.width = p.hp + '%';
-  $('#healthBar').style.background = p.hp < 35 ? '#f5a56c' : '#a6e4c4';
+  $('#healthBar').classList.toggle('low', p.hp < 35);
+  $('#armorNum').textContent = Math.round(p.armor || 0);
+  $('#armorBar').style.width = Math.min(100, p.armor || 0) + '%';
   $('#ammo').textContent = w.melee ? '—' : (item?.ammo ?? 0);
-  $('#maxAmmo').textContent = w.melee ? ' MELEE' : ' / ' + (item?.reserve ?? 0);
+  $('#maxAmmo').textContent = w.fists ? ' BARE HANDS' : w.melee ? ' MELEE' : w.consumable ? ' / ' + w.mag : ' / ' + (item?.reserve ?? 0);
   $('#weaponName').textContent = rarityName(p.rarity) + ' · ' + w.name;
   $('#weaponName').style.color = rarityColor(p.rarity);
+  const planted = w.sticky ? (state.charges || []).filter((c) => c.owner === p.id).length : 0;
   $('#reloadText').textContent =
     p.reload > 0
       ? `RELOAD ${p.reload.toFixed(1)}`
       : w.spinup && p.spin > 0 && p.spin < 1
         ? 'SPINNING UP'
-        : w.melee
+        : w.consumable
+          ? p.using
+            ? `USING · ${p.using.t.toFixed(1)} s`
+            : `${touch ? '●' : 'LMB'} · USE`
+          : w.fists
+            ? `${touch ? '●' : 'LMB'} · PUNCH · FIND A WEAPON`
+          : w.melee
           ? 'LMB · STRIKE'
-          : touch
-            ? '↻ · RELOAD'
-            : 'R · RELOAD';
+          : w.sticky
+            ? `${touch ? '⊕' : 'RMB'} · DETONATE${planted ? ' · ' + planted : ''}`
+            : touch
+              ? '↻ · RELOAD'
+              : 'R · RELOAD';
+  // Ballistic shield: its own bar, and the flashbang wash-out.
+  const guard = p.gear?.id === 'shield' ? p.gear : null,
+    guardMax = GEAR.find((g) => g.id === 'shield')?.hp || 1;
+  show('#shieldStatus', !!guard);
+  if (guard) $('#shieldBar').style.width = Math.max(0, Math.min(100, (guard.hp / guardMax) * 100)) + '%';
+  const blind = p.blinded || 0;
+  show('#flashFx', blind > 0);
+  $('#flashFx').style.opacity = blind > 0 ? Math.min(1, blind / 1.6).toFixed(2) : '0';
   const gear = p.gear && GEAR.find((g) => g.id === p.gear.id);
-  show('#gearStatus', !!gear);
+  show('#gearStatus', !!gear && p.gear.id !== 'shield');
   if (gear) {
     $('#gearName').textContent = p.gliding ? 'GLIDING' : p.thrusting ? 'JETPACK · THRUST' : gear.name;
     $('#gearBar').style.width = (gear.fuel ? (p.gear.fuel / gear.fuel) * 100 : 100) + '%';
   }
   updateInventoryHUD(p);
+  itemHud(p);
+  ambience(p);
   if (p.hp < lastHP - 1) {
     $('#vignette').style.boxShadow = 'inset 0 0 100px #c33d3766';
     setTimeout(() => ($('#vignette').style.boxShadow = ''), 160);
   }
   lastHP = p.hp;
+  document.body.classList.toggle('low-hp', p.hp > 0 && p.hp < 30);
   $('#crosshair').style.left = '50%';
   $('#crosshair').style.top = '50%';
   $('#hitmarker').style.left = '50%';
@@ -1005,10 +1368,12 @@ function hud(dt) {
     $('#timer').textContent = contenders.filter((o) => o.hp > 0).length + ' / ' + contenders.length;
     $('#score').textContent = 'ALIVE';
   }
-  show('#zoneStatus', royale);
-  if (royale) {
+  // Royale's shrinking zone, or the fixed ring of a big-city duel.
+  const ring = royale || !!state.zone?.fixed;
+  show('#zoneStatus', ring);
+  if (ring && state.zone) {
     const outside = Math.hypot(p.x - state.zone.x, p.z - state.zone.z) > state.zone.radius;
-    $('#zoneStatus').textContent = (outside ? 'OUTSIDE ZONE · ' : 'SAFE ZONE · ') + Math.ceil(state.zone.radius) + ' m';
+    $('#zoneStatus').textContent = (outside ? (royale ? 'OUTSIDE ZONE · ' : 'OUTSIDE THE RING · ') : royale ? 'SAFE ZONE · ' : 'DUEL RING · ') + Math.ceil(state.zone.radius) + ' m';
     $('#zoneStatus').classList.toggle('danger', outside);
   }
   show('#cheatBadge', !!state.cheated);
@@ -1109,6 +1474,7 @@ function toggleInventory(open) {
   inventoryOpen = open;
   clearInput();
   show('#inventory', open);
+  if (open) tutorial?.inventoryOpened();
   if (open) {
     releaseMouse();
     gameplay(false);
@@ -1119,10 +1485,28 @@ function toggleInventory(open) {
   }
 }
 let inventoryKey = '';
+// The relic in the inventory panel: its name and the two abilities on F and G.
+function relicRow(p) {
+  const r = p.relic && RELICS[p.relic.id];
+  if (!r) return '';
+  const hex = '#' + r.color.toString(16).padStart(6, '0');
+  return `<div class="inventory-weapon relic-row" style="--rarity:${hex}"><span class="slot-no">★</span><i class="gem"></i><div><b>${r.name} · RELIC</b><small>${r.abilities.map((a, k) => `${touch ? '' : ['F', 'G'][k] + ' · '}${a.label}`).join('   ')} · drops if you fall</small></div><span>RELIC</span></div>`;
+}
 function slotLabel(item) {
   const w = WEAPONS[item.w];
-  return w.melee ? 'MELEE' : `${item.ammo} / ${item.reserve}`;
+  return w.fists ? 'FISTS' : w.melee ? 'MELEE' : w.consumable ? `× ${item.ammo}` : `${item.ammo} / ${item.reserve}`;
 }
+// What an item does, in a few words, and what it just did.
+const ITEM_DONE = (w) => {
+  const e = w.effect || {};
+  if (e.armor && e.hp) return 'FULL HEALTH AND ARMOUR';
+  if (e.armor) return `+${e.armor} ARMOUR`;
+  if (e.regen) return `REGENERATING ${e.regen} OVER ${e.over} s`;
+  if (e.speed) return `+${Math.round((e.speed - 1) * 100)} % SPEED FOR ${e.time} s`;
+  if (e.stim) return `ENDLESS STAMINA FOR ${e.stim} s`;
+  if (e.hp) return `+${e.hp} HEALTH`;
+  return w.name + ' SET DOWN';
+};
 function updateInventoryHUD(p) {
   const barKey = JSON.stringify([p.slots, p.slot]);
   if (barKey !== updateInventoryHUD.bar) {
@@ -1139,20 +1523,37 @@ function updateInventoryHUD(p) {
       e.querySelector('b').textContent = item ? slotLabel(item) : i === 0 ? 'MELEE' : 'EMPTY';
     });
   }
-  $('#armorLabel').textContent = `ARMOR ${p.armor} · MEDKITS ${p.medkits}`;
+  const relic = p.relic && RELICS[p.relic.id];
+  show('#relicSlot', !!relic);
+  if (relic) {
+    const hex = '#' + relic.color.toString(16).padStart(6, '0'),
+      ready = p.relic.cd.some((c) => c <= 0);
+    $('#relicSlot').style.setProperty('--rarity', hex);
+    $('#relicSlot').classList.toggle('ready', ready);
+    $('#relicSlot b').textContent = relic.name.split(' ').slice(-1)[0];
+    $('#relicSlot').title = relic.name;
+  }
+  const vest = p.armorTier ? ARMOR_TIERS.find((a) => a.id === p.armorTier) : null;
+  $('#armorLabel').textContent = `MEDKITS ${p.medkits}${vest ? ' · ' + vest.name.toUpperCase() : ''}`;
   const near = (state.chests || []).filter(
-    (c) => !c.opened && Math.hypot(c.x - p.x, c.z - p.z) < 2.8 && lineClear(p, c, 0, view.map.obstacles),
+    (c) => !c.opened && Math.hypot(c.x - p.x, c.z - p.z) < 2.8 && Math.abs((c.y || 0) - (p.y || 0)) < 1.8 && lineClear(p, c, 0, view.map.obstacles),
   )[0];
   show('#lootPrompt', !!near && !inventoryOpen && p.hp > 0 && state.winner === null);
   if (near) {
     const what =
       near.kind === 'drop'
         ? near.loot
-          ? `PICK UP ${rarityName(near.loot.r)} ${WEAPONS[near.loot.w].name}`
+          ? WEAPONS[near.loot.w].consumable
+            ? `PICK UP ${near.ammo ?? WEAPONS[near.loot.w].found ?? 1} × ${WEAPONS[near.loot.w].name}`
+            : `PICK UP ${rarityName(near.loot.r)} ${WEAPONS[near.loot.w].name}`
           : 'PICK UP ' + (GEAR.find((g) => g.id === near.gear)?.name || 'SUPPLIES')
         : near.tier === 'supply'
           ? 'OPEN SUPPLY CRATE'
-          : 'OPEN CHEST';
+          : near.tier === 'legendary'
+            ? 'OPEN LEGENDARY CHEST'
+            : near.tier === 'roof'
+              ? 'OPEN ROOF CHEST'
+              : 'OPEN CHEST';
     $('#lootPrompt').textContent = (touch ? '' : 'E · ') + what;
     $('#lootPrompt').style.borderColor = near.kind === 'drop' && near.loot ? rarityColor(near.loot.r) : 'transparent';
   }
@@ -1167,7 +1568,7 @@ function updateInventoryHUD(p) {
   $('#supplyText').textContent =
     `Medkits: ${p.medkits} / 5 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'}`;
   $('#healBtn').disabled = p.medkits === 0 || p.hp >= 100;
-  const key = JSON.stringify([p.slots, p.slot]);
+  const key = JSON.stringify([p.slots, p.slot, p.relic?.id]);
   if (key !== inventoryKey) {
     inventoryKey = key;
     $('#inventoryWeapons').innerHTML = p.slots
@@ -1175,10 +1576,11 @@ function updateInventoryHUD(p) {
         if (!item)
           return `<button class="inventory-weapon" disabled><span class="slot-no">${i + 1}</span><div><b>Empty slot</b><small>Open chests to find weapons</small></div></button>`;
         const w = WEAPONS[item.w],
-          st = weaponStats(item.w, item.r);
-        return `<button class="inventory-weapon ${i === p.slot ? 'selected' : ''}" data-equip="${i}" style="--rarity:${rarityColor(item.r)}"><span class="slot-no">${i + 1}</span><img src="./icons/${w.model}.png" alt=""><div><b>${w.name} · ${w.ru}</b><small><em>${rarityName(item.r)}</em> · ${Math.round(st.damage)}${w.pellets > 1 ? '×' + w.pellets : ''} dmg · ${slotLabel(item)}</small></div><span>${i === p.slot ? 'EQUIPPED' : 'EQUIP'}</span></button>`;
+          st = weaponStats(item.w, item.r),
+          line = w.consumable || w.desc ? `${w.desc || ''} · ${slotLabel(item)}` : w.fists ? 'What everyone starts with. Find a weapon.' : `${Math.round(st.damage)}${w.pellets > 1 ? '×' + w.pellets : ''} dmg · ${slotLabel(item)}`;
+        return `<button class="inventory-weapon ${i === p.slot ? 'selected' : ''}" data-equip="${i}" style="--rarity:${rarityColor(item.r)}"><span class="slot-no">${i + 1}</span><img src="./icons/${w.model}.png" alt=""><div><b>${w.name} · ${w.ru}</b><small><em>${rarityName(item.r)}</em> · ${line}</small></div><span>${i === p.slot ? 'EQUIPPED' : 'EQUIP'}</span></button>`;
       })
-      .join('');
+      .join('') + relicRow(p);
     document.querySelectorAll('[data-equip]').forEach(
       (e) =>
         (e.onclick = () => {
@@ -1256,31 +1658,120 @@ function updateInventoryHUD(p) {
 setInterval(() => {
   if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'ping', sent: performance.now() }));
 }, 2000);
-// Online: your own movement is shown ahead of the server by what you did during the last round trip, so walking
-// responds at once instead of one ping later. The offset fades as the server catches up, and never goes into walls.
-const prediction = { x: 0, z: 0 };
-function predicted(dt) {
-  const me = mode === 'online' && state.players.find((p) => p.id === id);
-  if (!me || me.hp <= 0 || me.inBus || me.frozen > 0 || paused) {
-    prediction.x = prediction.z = 0;
-    return state;
-  }
-  const i = input(),
-    speed = me.dropping ? 13 : me.gliding ? 10 : (i.sprint && me.stamina > 0 ? 9 : 5.8) * (WEAPONS[me.weapon]?.move || 1),
-    rtt = Math.max(0.03, Math.min(0.5, (latency || 60) / 1000)),
-    k = Math.exp(-dt / rtt);
-  prediction.x = (prediction.x + (i.x || 0) * speed * dt) * k;
-  prediction.z = (prediction.z + (i.z || 0) * speed * dt) * k;
-  const len = Math.hypot(prediction.x, prediction.z);
-  if (len > 2.5) (prediction.x *= 2.5 / len), (prediction.z *= 2.5 / len);
-  const to = { x: me.x + prediction.x, z: me.z + prediction.z };
-  if (view.map && !lineClear(me, to, 0.3, view.map.obstacles)) {
-    prediction.x *= 0.5;
-    prediction.z *= 0.5;
-    return state;
-  }
-  return { ...state, players: state.players.map((p) => (p === me ? { ...p, x: to.x, z: to.z } : p)) };
+// Online: others are drawn a little in the past, smoothly between states (netcode.js Interpolator); you are drawn
+// where your own inputs have taken you, replayed on top of the last position the server confirmed (Predictor).
+// While a pad, a glider, a knock-back or the bus moves you, you are shown where the server says.
+let perkCache = { key: null, speed: 1 };
+function predictCtx(me) {
+  const key = packSkills(profile.skills);
+  if (perkCache.key !== key) perkCache = { key, speed: skillPerks(profile.skills).speed || 1 };
+  return { weaponMove: WEAPONS[me.weapon]?.move || 1, perkSpeed: perkCache.speed, carry: carryWeight(me) };
 }
+function predicted(dt) {
+  if (mode !== 'online') return state;
+  const shown = interp.apply(state, id),
+    me = state.players.find((p) => p.id === id);
+  if (!me || me.hp <= 0 || me.inBus || me.dropping || me.gliding || me.launched || me.push || me.frozen > 0 || me.cheats?.flight || !view?.map) {
+    predictor.idle(me);
+    return shown;
+  }
+  const pos = predictor.position(me, view.map, predictCtx(me), dt);
+  if (!pos) return shown;
+  return { ...shown, players: shown.players.map((p) => (p.id === id ? { ...p, x: pos.x, y: pos.y, z: pos.z } : p)) };
+}
+// ---- Lobby stage ---------------------------------------------------------------------------------
+// In the lobby the view shows one character on the stage (lobby-stage.js): you, in what you wear, holding your
+// primary — or whatever is being previewed (a wardrobe item under the pointer or picked, a weapon or gear in the
+// inventory tab, an emote playing for a few seconds). Drag the character to turn it.
+const lobby = { yaw: 0.4, spin: 0, drag: null, preview: null, weapon: null, gear: null, emote: 0, picked: null };
+// Party members in a private group stand beside you, the way they will drop in.
+const PARTY_SPOTS = [
+  [-1.35, -0.55, 0.3],
+  [1.35, -0.55, -0.3],
+  [-2.55, -1.3, 0.5],
+];
+function lobbyState(base, party = null) {
+  const others = party ?? (group && !group.public ? base.players.filter((q) => q.id !== id && !q.bot).slice(0, 3) : []),
+    spot = { ...lobbySpot(base.size), party: others.length },
+    menuBox = $('#menu').getBoundingClientRect(),
+    // How much of the screen the menu covers: the character stands in the middle of the rest.
+    shift = innerWidth > innerHeight * 1.15 ? Math.min(0.7, Math.max(0, menuBox.right / innerWidth)) : 0,
+    // Portrait: the menu starts lower down and the character stands in the band above it.
+    lift = innerWidth > innerHeight * 1.15 ? 0 : Math.max(0, 1 - Math.min(0.9, menuBox.top / innerHeight)),
+    l = profile.loadout,
+    gear = lobby.gear ?? l.gear,
+    f = spot.face,
+    at = (dx, dz) => ({ x: spot.x + Math.cos(f) * dx + Math.sin(f) * dz, y: spot.y, z: spot.z - Math.sin(f) * dx + Math.cos(f) * dz });
+  lobby.spin *= 0.9;
+  if (!lobby.drag) lobby.yaw += lobby.spin;
+  lobbyPlate(shift);
+  const stand = { pitch: 0, hp: 100, rarity: 0, grounded: true, moving: 0, shot: 0, slots: [], lowReady: true };
+  return {
+    ...base,
+    lobby: { ...spot, shift, lift },
+    projectiles: [],
+    charges: [],
+    players: [
+      {
+        ...stand,
+        id,
+        name: ($('#nickname').value || 'PLAYER').slice(0, 16),
+        ...at(0, 0),
+        angle: f + lobby.yaw,
+        weapon: lobby.weapon ?? l.primary,
+        cosmetics: { ...profile.equipped, ...(lobby.preview || {}) },
+        emote: lobby.emote > 0 ? 1 : 0,
+        gear: gear && gear !== 'none' ? { id: gear, fuel: 100, hp: 100 } : null,
+      },
+      ...others.map((q, i) => ({
+        ...stand,
+        id: q.id,
+        name: q.name,
+        ...at(PARTY_SPOTS[i][0], PARTY_SPOTS[i][1]),
+        angle: f + PARTY_SPOTS[i][2],
+        weapon: q.weapon ?? 0,
+        cosmetics: q.cosmetics,
+        emote: 0,
+        gear: null,
+      })),
+    ],
+  };
+}
+// The name plate under your character: name, level and skin, or what is being tried on.
+let plateKey = '';
+function lobbyPlate(shift) {
+  const trying = lobby.preview && COSMETICS.find((c) => c.id === Object.values(lobby.preview)[0]),
+    skin = COSMETICS.find((c) => c.id === profile.equipped.operator),
+    info = trying
+      ? `TRYING ON · ${trying.name.toUpperCase()} · ${COSMETIC_RARITIES[cosmeticRarity(trying)].name}`
+      : `LEVEL ${levelOf(profile.skills)} · ${(skin?.name || '').toUpperCase()}`,
+    name = ($('#nickname').value || 'PLAYER').slice(0, 16),
+    key = [name, info, shift.toFixed(3)].join('|');
+  if (key === plateKey) return;
+  plateKey = key;
+  $('#plateName').textContent = name;
+  $('#plateInfo').textContent = info;
+  $('#lobbyPlate').style.left = ((shift + 1) / 2) * 100 + 'vw';
+}
+function previewCosmetic(c) {
+  lobby.preview = c ? { [c.kind]: c.id } : null;
+  if (c?.kind === 'emote') lobby.emote = 4;
+}
+$('#game').addEventListener('pointerdown', (e) => {
+  if (mode !== 'menu' || panel) return;
+  lobby.drag = { x: e.clientX, id: e.pointerId };
+  lobby.spin = 0;
+});
+window.addEventListener('pointermove', (e) => {
+  if (!lobby.drag || e.pointerId !== lobby.drag.id) return;
+  const dx = e.clientX - lobby.drag.x;
+  lobby.drag.x = e.clientX;
+  lobby.yaw += dx * 0.012;
+  lobby.spin = dx * 0.004;
+});
+window.addEventListener('pointerup', (e) => {
+  if (lobby.drag?.id === e.pointerId) lobby.drag = null;
+});
 function frame(t) {
   let dt = Math.min((t - last) / 1000 || 0, 0.1);
   last = t;
@@ -1291,23 +1782,31 @@ function frame(t) {
       sim.step();
       jump = false;
       interact = false;
+      detonate = false;
       heal = false;
       emote = false;
       dash = false;
       acc -= 1 / 60;
     }
     state = sim.snapshot();
-    for (const e of sim.drainEvents()) handleEvent(e);
+    const events = sim.drainEvents();
+    for (const e of events) handleEvent(e);
+    tutorialStep(events, dt);
     reload = false;
   } else acc = 0;
   if (mode === 'online') {
     netTimer += dt;
     if (netTimer >= 1 / 60 && socket?.readyState === 1) {
-      socket.send(JSON.stringify({ type: 'input', input: { ...input(), lag: latency } }));
+      // Numbered, so the server can say which inputs it has applied; `interp` is how far in the past others are
+      // shown here (the server rewinds its hit checks by that plus the round trip).
+      const i = input();
+      i.seq = predictor.record(i, netTimer);
+      socket.send(JSON.stringify({ type: 'input', input: { ...i, lag: latency, interp: Math.round(interp.delay) } }));
       netTimer = 0;
       reload = false;
       jump = false;
       interact = false;
+      detonate = false;
       heal = false;
       emote = false;
       dash = false;
@@ -1327,34 +1826,373 @@ function frame(t) {
   }
   previousAlive = alive;
   const spectated = state.mode === 'royale' && player?.hp <= 0 ? state.players.find((p) => p.hp > 0) : null;
+  lobby.emote = Math.max(0, lobby.emote - dt);
   view.update(
-    predicted(dt),
+    mode === 'menu' ? lobbyState(state) : predicted(dt),
     spectated?.id || id,
     mode === 'training' && (paused || inventoryOpen || panel) ? 0 : dt,
     mode === 'menu',
     { angle: spectated?.angle ?? angle, pitch: spectated?.pitch ?? pitch, aim: aiming },
   );
   if (mode !== 'menu') hud(dt);
+  else ambience(null);
   requestAnimationFrame(frame);
 }
 window.addEventListener('resize', () => view?.resize());
+// The graphics driver dropped the game's context (a driver crash or reset, or too little video memory). The
+// browser usually hands it back; if it has not within a few seconds it has switched 3D off, and only a reload
+// (or a browser restart) helps. Either way the next start uses safer settings, so it does not happen again.
+let contextLostTimer = 0;
 $('#game').addEventListener('webglcontextlost', (e) => {
   e.preventDefault();
-  pause(true);
+  // A tab in the background can lose its context without anything being wrong; only a loss in view counts.
+  if (!document.hidden)
+    try {
+      localStorage.setItem('prida-gl-lost', String(Date.now()));
+    } catch {}
+  if (mode !== 'menu') pause(true);
   $('#pauseNote').textContent = 'Graphics context lost. Restoring the scene…';
+  clearTimeout(contextLostTimer);
+  contextLostTimer = setTimeout(() => {
+    // In the lobby there is no pause card: the loading screen explains instead.
+    if (mode === 'menu')
+      return showHelp({
+        title: '3D graphics stopped.',
+        text: 'The browser switched 3D off after a graphics error. Press TRY AGAIN; if it does not come back, follow the steps below.',
+        steps: true,
+      });
+    $('#pauseNote').textContent =
+      'The browser switched 3D off after a graphics error. Reload the page; if this keeps happening, close the browser completely and open it again.';
+    show('#reloadPage', true);
+  }, 5000);
 });
 $('#game').addEventListener('webglcontextrestored', () => {
+  clearTimeout(contextLostTimer);
+  show('#reloadPage', false);
   $('#pauseNote').textContent = 'Graphics restored. You can resume.';
 });
-function saveProfile() {
+$('#reloadPage').onclick = () => location.reload();
+function saveProfile(upload = true) {
   try {
     saveStore?.setItem('prida-profile-v1', JSON.stringify(profile));
+    if (upload) saveStore?.setItem('prida-profile-saved', String(Date.now()));
     saveAvailable = !!saveStore;
   } catch {
     saveAvailable = false;
   }
   updateWallet();
+  if (upload && account) queueProfileUpload();
 }
+// ---- Accounts (0.23): the profile and the friend list on the PRIDA server --------------------------------------
+// The server is the one this page plays online against (never a made-up address); without one, progress stays on
+// this device as before.
+let account = null,
+  uploadTimer = 0,
+  groupDirect = false,
+  joinParty = null,
+  presence = null,
+  presenceTimer = 0,
+  inviteTimer = 0;
+try {
+  account = JSON.parse(localStorage.getItem('prida-account') || 'null');
+} catch {}
+function apiBase() {
+  const ws = serverEndpoint();
+  if (!ws) return null;
+  try {
+    const u = new URL(ws);
+    return (u.protocol === 'wss:' ? 'https://' : 'http://') + u.host;
+  } catch {
+    return null;
+  }
+}
+async function api(method, route, body) {
+  const base = apiBase();
+  if (!base) throw Error('Accounts live on a PRIDA server. Open the game on its own site, or enter a server under PLAY ONLINE → Server connection.');
+  let r;
+  try {
+    r = await fetch(base + route, {
+      method,
+      headers: { 'content-type': 'application/json', ...(account?.token ? { authorization: 'Bearer ' + account.token } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw Error('Cannot reach the PRIDA server. A free server can take a minute to wake up: try again.');
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(Error(j.error || 'The server refused (' + r.status + ').'), { status: r.status });
+  return j;
+}
+function storeAccount() {
+  try {
+    if (account) localStorage.setItem('prida-account', JSON.stringify(account));
+    else localStorage.removeItem('prida-account');
+  } catch {}
+}
+function accountStatus(text) {
+  $('#accountStatus').textContent = text || '';
+}
+function queueProfileUpload() {
+  clearTimeout(uploadTimer);
+  uploadTimer = setTimeout(async () => {
+    try {
+      await api('PUT', '/api/profile', { profile });
+    } catch (e) {
+      if (e.status === 401) signedOut('Your session ended: log in again to keep saving to your account.');
+    }
+  }, 1500);
+}
+function signedOut(note = '') {
+  closePresence();
+  account = null;
+  storeAccount();
+  renderAccount();
+  accountStatus(note);
+}
+// Everything the lobby shows from the profile.
+function refreshProfileUI() {
+  updateWallet();
+  renderLoadoutSummary();
+  view?.setCosmetics(profile.equipped);
+  if (menuTab === 'shop') renderShop();
+  if (menuTab === 'skills') renderSkills();
+  if (menuTab === 'loadout') renderLoadoutPanel();
+}
+function renderAccount() {
+  $('#accountBtn').textContent = account ? account.name : 'LOG IN';
+  show('#accountOut', !account);
+  show('#accountIn', !!account);
+  if (!account) return;
+  $('#accWho').textContent = account.name;
+  $('#accCode').textContent = account.code || '—';
+  renderFriends();
+}
+function renderFriends() {
+  const list = $('#friendList');
+  list.innerHTML = '';
+  for (const name of account?.friends || []) {
+    const li = document.createElement('li'),
+      label = document.createElement('span'),
+      state = document.createElement('i'),
+      remove = document.createElement('button');
+    label.textContent = name;
+    const online = friendsOnline.has(name.toLowerCase());
+    state.textContent = online ? 'online' : 'offline';
+    state.classList.toggle('on', online);
+    li.append(label, state);
+    if (online) {
+      const invite = document.createElement('button');
+      invite.className = 'invite';
+      invite.textContent = 'INVITE';
+      invite.onclick = () => inviteFriend(name);
+      li.append(invite);
+    }
+    remove.textContent = 'REMOVE';
+    remove.onclick = () => friendAction({ remove: name });
+    li.append(remove);
+    list.append(li);
+  }
+  if (!(account?.friends || []).length) list.innerHTML = '<li><span>No friends yet: share your code.</span></li>';
+  renderGroupFriends();
+}
+// Online friends in a private group's panel, one tap to invite.
+function renderGroupFriends() {
+  const names = (account?.friends || []).filter((n) => friendsOnline.has(n.toLowerCase())),
+    open = !!group && !group.public && names.length > 0;
+  show('#groupFriends', open);
+  if (!open) return;
+  const list = $('#groupFriendList');
+  list.replaceChildren();
+  for (const name of names) {
+    const li = document.createElement('li'),
+      label = document.createElement('span'),
+      invite = document.createElement('button');
+    label.textContent = name;
+    invite.textContent = 'INVITE';
+    invite.onclick = () => inviteFriend(name);
+    li.append(label, invite);
+    list.append(li);
+  }
+}
+// Friends online and group invites: while signed in, one small socket to the server (see server.mjs).
+function openPresence() {
+  clearTimeout(presenceTimer);
+  if (presence || !account?.token) return;
+  let url;
+  try {
+    url = validEndpoint(serverEndpoint(), location.protocol === 'https:');
+  } catch {
+    return;
+  }
+  url.search = '?presence=1';
+  const ws = new WebSocket(url);
+  presence = ws;
+  ws.onopen = () => ws.send(JSON.stringify({ token: account?.token || '' }));
+  ws.onmessage = (e) => {
+    let m;
+    try {
+      m = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (m.type === 'friends') {
+      friendsOnline.clear();
+      for (const n of m.online || []) friendsOnline.add(String(n).toLowerCase());
+      renderFriends();
+    } else if (m.type === 'invite') showInvite(m);
+    else if (m.type === 'invite-sent') friendNote('Invite sent to ' + m.to + '.');
+    else if (m.type === 'invite-failed') friendNote(m.to + ' is not online right now.');
+  };
+  ws.onclose = (e) => {
+    if (presence !== ws) return;
+    presence = null;
+    friendsOnline.clear();
+    renderFriends();
+    if (e.code === 4003) return signedOut('Your session ended: log in again.');
+    if (account) presenceTimer = setTimeout(openPresence, e.code === 4000 ? 60000 : 15000);
+  };
+  ws.onerror = () => {};
+}
+function closePresence() {
+  clearTimeout(presenceTimer);
+  const ws = presence;
+  presence = null;
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+  }
+  friendsOnline.clear();
+}
+function friendNote(text) {
+  accountStatus(text);
+  if (group) $('#connectionStatus').textContent = text;
+}
+function inviteFriend(name) {
+  if (!group || group.public) return friendNote('Open a group first: PLAY ONLINE → CREATE GROUP, then invite ' + name + '.');
+  if (presence?.readyState !== 1) return friendNote('Still connecting to the server. Try again in a moment.');
+  presence.send(JSON.stringify({ type: 'invite', to: name, party: group.code, mode: group.mode, direct: groupDirect }));
+}
+const MODE_NAMES = { royale: 'Battle Royale', 'royale-city': 'Battle Royale', duel: 'Duel', classic: 'Free for all' };
+function showInvite(m) {
+  if (group?.code === m.party) return;
+  $('#inviteText').textContent = `${m.from} invites you to group ${m.party} (${MODE_NAMES[m.mode] || 'match'}).`;
+  $('#inviteJoin').textContent = mode === 'menu' ? 'JOIN' : 'LEAVE MATCH AND JOIN';
+  show('#inviteBanner', true);
+  clearTimeout(inviteTimer);
+  inviteTimer = setTimeout(() => show('#inviteBanner', false), 60000);
+  $('#inviteJoin').onclick = () => {
+    show('#inviteBanner', false);
+    releaseMouse();
+    if (socket) disconnect();
+    $('#directMode').checked = !!m.direct;
+    joinParty?.({ party: m.party });
+  };
+  playInviteSound();
+}
+$('#inviteDismiss').onclick = () => show('#inviteBanner', false);
+const friendsOnline = new Set();
+async function friendAction(body) {
+  try {
+    const r = await api('POST', '/api/friends', body);
+    account.friends = r.friends;
+    storeAccount();
+    renderFriends();
+    if (presence?.readyState === 1) presence.send(JSON.stringify({ type: 'refresh' }));
+    accountStatus(body.remove ? 'Removed.' : 'Friend added.');
+  } catch (e) {
+    accountStatus(e.message);
+  }
+}
+async function signIn(register) {
+  const name = $('#accName').value.trim(),
+    password = $('#accPass').value;
+  accountStatus(register ? 'Creating your account…' : 'Logging in…');
+  try {
+    const r = await api('POST', register ? '/api/register' : '/api/login', { name, password });
+    account = { name: r.name, token: r.token, code: r.code, friends: r.friends || [] };
+    storeAccount();
+    $('#accPass').value = '';
+    if (r.profile) {
+      // The account's progress replaces this device's.
+      profile = readProfile(r.profile);
+      saveProfile(false);
+      refreshProfileUI();
+      accountStatus('Welcome back, ' + r.name + '. Your progress is loaded.');
+    } else {
+      // A new account starts from what this device has.
+      await api('PUT', '/api/profile', { profile });
+      accountStatus(register ? 'Account created. This device’s progress is saved to it.' : 'Signed in. This device’s progress is saved to your account.');
+    }
+    if (!$('#nickname').value || $('#nickname').value === 'PLAYER') $('#nickname').value = r.name.toUpperCase();
+    closePresence();
+    openPresence();
+  } catch (e) {
+    accountStatus(e.message);
+  }
+  renderAccount();
+}
+// On start, a signed-in device takes the account's progress if it was saved more recently elsewhere, and sends its
+// own otherwise.
+async function syncAccount() {
+  if (!account || !apiBase()) return;
+  try {
+    const me = await api('GET', '/api/me');
+    Object.assign(account, { friends: me.friends, code: me.code });
+    storeAccount();
+    let local = 0;
+    try {
+      local = +saveStore?.getItem('prida-profile-saved') || 0;
+    } catch {}
+    if (me.profile && (me.saved || 0) > local) {
+      profile = readProfile(me.profile);
+      saveProfile(false);
+      refreshProfileUI();
+    } else queueProfileUpload();
+    renderAccount();
+    openPresence();
+  } catch (e) {
+    if (e.status === 401) signedOut('');
+  }
+}
+async function openAccount() {
+  openPanel('accountPanel');
+  renderAccount();
+  $('#accountStore').textContent = '';
+  if (!apiBase()) return ($('#accountStore').textContent = 'This copy of the game has no PRIDA server to keep accounts on; progress is saved on this device.');
+  try {
+    const s = await api('GET', '/api/status');
+    $('#accountStore').textContent = s.persistent
+      ? 'Accounts are kept in the server’s database.'
+      : 'This server keeps accounts in a file that is cleared when it restarts (free hosting). Your progress also stays on this device.';
+    if (account) {
+      const me = await api('GET', '/api/me');
+      account.friends = me.friends;
+      account.code = me.code;
+      storeAccount();
+      renderAccount();
+    }
+  } catch (e) {
+    if (e.status === 401) signedOut('Your session ended: log in again.');
+    else $('#accountStore').textContent = e.message;
+  }
+}
+$('#accountBtn').onclick = openAccount;
+$('#accountForm').onsubmit = (e) => {
+  e.preventDefault();
+  signIn(false);
+};
+$('#accRegister').onclick = () => signIn(true);
+$('#accLogout').onclick = async () => {
+  try {
+    await api('POST', '/api/logout', {});
+  } catch {}
+  signedOut('Logged out. Progress stays on this device.');
+};
+$('#friendAdd').onclick = () => {
+  const code = $('#friendCode').value.trim();
+  if (code) friendAction({ code });
+  $('#friendCode').value = '';
+};
 function updateWallet() {
   $('#coinBalance').textContent = profile.coins + ' coins';
   $('#shopBalance').textContent = profile.coins + ' COINS';
@@ -1384,6 +2222,37 @@ const KIND_LABELS = {
   emote: 'EMOTE',
 };
 let wardrobeKind = 'operator';
+// Small line icons for the item cards, one per wardrobe slot.
+const KIND_ART = {
+  operator: '<path d="M12 3c-4 0-7 2.6-7 6.4V12h14V9.4C19 5.6 16 3 12 3z"/><path d="M6 13h12v2.5a6 6 0 0 1-12 0z" opacity=".7"/><path d="M9 21h6" stroke="currentColor" stroke-width="2" fill="none"/>',
+  accessory: '<path d="M4 15c0-5 3.6-9 8-9s8 4 8 9z"/><path d="M2 15h20v2H2z" opacity=".7"/>',
+  finish: '<path d="M12 3s6 7 6 11a6 6 0 0 1-12 0c0-4 6-11 6-11z"/>',
+  pattern: '<path d="M3 5h18v3H3zM3 10.5h18v3H3zM3 16h18v3H3z"/>',
+  charm: '<path d="M12 2l2.9 6.2 6.6.6-5 4.5 1.5 6.6L12 16.6 6 19.9l1.5-6.6-5-4.5 6.6-.6z"/>',
+  effect: '<path d="M12 2l1.8 5.4L19 9l-5.2 1.6L12 16l-1.8-5.4L5 9l5.2-1.6zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9zM5 15l.9 2.1L8 18l-2.1.9L5 21l-.9-2.1L2 18l2.1-.9z"/>',
+  emote: '<circle cx="12" cy="5" r="2.6"/><path d="M12 8.5l-4.5 3.5 1.2 1.4 2.3-1.7V22h2v-6h.2v6h2V11.7l3.3-4.4-1.6-1.2z"/>',
+};
+function shopCard(c) {
+  const owned = profile.owned.includes(c.id),
+    equipped = profile.equipped[c.kind] === c.id,
+    picked = lobby.picked === c.id,
+    r = cosmeticRarity(c),
+    tier = PASS_TIERS.indexOf(c.id),
+    cost = equipped
+      ? 'EQUIPPED'
+      : owned
+        ? 'EQUIP'
+        : c.pass
+          ? tier >= 0
+            ? 'PASS TIER ' + (tier + 1)
+            : 'BATTLE PASS'
+          : picked
+            ? profile.coins >= c.price
+              ? 'TAP TO BUY · ' + c.price
+              : 'NEED ' + (c.price - profile.coins) + ' MORE'
+            : c.price + ' COINS';
+  return `<button class="shop-item rarity-${r} ${equipped ? 'selected' : ''} ${picked ? 'picked' : ''} ${!owned && c.pass ? 'locked' : ''} ${!owned && !c.pass && profile.coins < c.price ? 'poor' : ''}" data-cosmetic="${c.id}" style="--finish:${c.color};--rar:${COSMETIC_RARITIES[r].color}"><span class="item-art"><svg viewBox="0 0 24 24" aria-hidden="true">${KIND_ART[c.kind] || ''}</svg></span><span class="item-rarity">${COSMETIC_RARITIES[r].name}</span><b>${c.name}</b><small>${KIND_LABELS[c.kind]}</small><span class="item-cost">${cost}</span></button>`;
+}
 function renderShop() {
   refreshProfile();
   updateWallet();
@@ -1394,35 +2263,46 @@ function renderShop() {
     (el) =>
       (el.onclick = () => {
         wardrobeKind = el.dataset.kind;
+        lobby.picked = null;
+        previewCosmetic(null);
         renderShop();
       }),
   );
-  $('#shopItems').innerHTML = itemsOfKind(wardrobeKind).map((c) => {
-    const owned = profile.owned.includes(c.id),
-      equipped = profile.equipped[c.kind] === c.id,
-      locked = !owned && c.pass,
-      cost = locked ? 'BATTLE PASS' : owned ? 'EQUIP' : c.price + ' COINS';
-    return `<button class="shop-item ${equipped ? 'selected' : ''} ${locked ? 'locked' : ''}" data-cosmetic="${c.id}" style="--finish:${c.color}" ${(!owned && (c.pass || profile.coins < c.price)) ? 'disabled' : ''}><span class="finish-swatch"></span><small>${KIND_LABELS[c.kind]}</small><b>${c.name}</b><span>${equipped ? 'EQUIPPED' : cost}</span></button>`;
-  }).join('');
+  $('#shopItems').innerHTML = itemsOfKind(wardrobeKind).map(shopCard).join('');
   renderPass();
-  document.querySelectorAll('[data-cosmetic]').forEach(
-    (el) =>
-      (el.onclick = () => {
-        refreshProfile();
-        if (!buyOrEquip(profile, el.dataset.cosmetic)) return;
-        saveProfile();
-        renderShop();
-        view?.setCosmetics(profile.equipped);
-        if (socket?.readyState === 1 && group?.phase === 'lobby')
-          socket.send(JSON.stringify({ type: 'appearance', value: profile.equipped }));
-        const p = sim?.players.find((p) => p.id === id);
-        if (p) {
-          p.cosmetics = { ...profile.equipped };
-          state = sim.snapshot();
-        }
-        $('#shopMessage').textContent = 'Equipped. Cosmetics do not change weapon stats.';
-      }),
-  );
+  document.querySelectorAll('[data-cosmetic]').forEach((el) => {
+    const c = COSMETICS.find((x) => x.id === el.dataset.cosmetic);
+    // Pointing at a card tries it on the character on the stage; leaving it goes back to what is picked.
+    el.onpointerenter = el.onfocus = () => previewCosmetic(c);
+    el.onpointerleave = el.onblur = () => previewCosmetic(COSMETICS.find((x) => x.id === lobby.picked) || null);
+    el.onclick = () => {
+      refreshProfile();
+      const owned = profile.owned.includes(c.id);
+      previewCosmetic(c);
+      // Something not yet yours: the first tap picks it (and shows it on you), the second buys it.
+      if (!owned && (c.pass || lobby.picked !== c.id || profile.coins < c.price)) {
+        lobby.picked = c.id;
+        $('#shopMessage').textContent = c.pass
+          ? `${c.name} is a battle pass reward. Keep playing to unlock it.`
+          : profile.coins < c.price
+            ? `${c.name} costs ${c.price} coins: ${c.price - profile.coins} more to go. Coins come from matches, eliminations and wins.`
+            : `${c.name} · ${COSMETIC_RARITIES[cosmeticRarity(c)].name}. Tap again to buy it for ${c.price} coins.`;
+        return renderShop();
+      }
+      if (!buyOrEquip(profile, c.id)) return;
+      lobby.picked = null;
+      saveProfile();
+      renderShop();
+      view?.setCosmetics(profile.equipped);
+      if (socket?.readyState === 1 && group?.phase === 'lobby') socket.send(JSON.stringify({ type: 'appearance', value: profile.equipped }));
+      const p = sim?.players.find((p) => p.id === id);
+      if (p) {
+        p.cosmetics = { ...profile.equipped };
+        state = sim.snapshot();
+      }
+      $('#shopMessage').textContent = owned ? 'Equipped. Cosmetics do not change weapon stats.' : `${c.name} is yours and equipped.`;
+    };
+  });
 }
 // Battle pass: thirty tiers, each one a cosmetic, earned by playing. No payments, no premium track.
 function renderPass() {
@@ -1482,6 +2362,61 @@ function renderSkills() {
       }),
   );
 }
+// Debug sandbox menu: every weapon, gear, supplies, target bots and the usual toggles, one tap each.
+function debugGive(what) {
+  if (!debugging()) return;
+  sim.debugGive(id, what);
+  state = sim.snapshot();
+  renderDebugPanel();
+}
+function renderDebugPanel() {
+  if (!debugging()) return closePanel();
+  const rarity = $('#debugRarity');
+  if (!rarity.options.length)
+    rarity.innerHTML = RARITIES.map((r, i) => `<option value="${i}">${r.name}</option>`).join('');
+  const r = () => +rarity.value || 0;
+  $('#debugWeapons').innerHTML = WEAPONS.map(
+    (w, i) =>
+      `<button data-give="${i}" title="${w.ru}"><img src="./icons/${w.model}.png" alt=""><b>${w.name}</b><small>${w.ru}</small></button>`,
+  ).join('');
+  $('#debugWeapons')
+    .querySelectorAll('[data-give]')
+    .forEach((el) => (el.onclick = () => debugGive({ weapon: +el.dataset.give, rarity: r(), ammo: true })));
+  $('#debugGear').innerHTML =
+    GEAR.map((g) => `<button data-gear="${g.id}"><img src="./icons/${g.model}.png" alt=""><b>${g.name}</b></button>`).join('') +
+    '<button data-gear=""><b>NO GEAR</b></button>';
+  $('#debugGear')
+    .querySelectorAll('[data-gear]')
+    .forEach((el) => (el.onclick = () => debugGive({ gear: el.dataset.gear })));
+  $('#debugBotCount').textContent = `${state.players.filter((p) => p.bot).length} IN THE MATCH`;
+  for (const [key, el] of [
+    ['god', 'debugGod'],
+    ['flight', 'debugFlight'],
+    ['infinite', 'debugInfinite'],
+  ]) {
+    $('#' + el).checked = cheatSettings[key];
+    $('#' + el).onchange = () => {
+      cheatSettings[key] = $('#' + el).checked;
+      applyCheats();
+    };
+  }
+}
+$('#debugBtn').onclick = () => openPanel('debugPanel');
+$('#debugAmmo').onclick = () => debugGive({ ammo: true });
+$('#debugSupplies').onclick = () => debugGive({ medkits: 5, armor: 100 });
+$('#debugHeal').onclick = () => debugGive({ heal: true });
+$('#debugAddBot').onclick = () => {
+  if (!debugging()) return;
+  sim.debugBots(1);
+  state = sim.snapshot();
+  renderDebugPanel();
+};
+$('#debugClearBots').onclick = () => {
+  if (!debugging()) return;
+  sim.debugBots(0);
+  state = sim.snapshot();
+  renderDebugPanel();
+};
 function openPanel(name) {
   if (mode !== 'menu') pause(true);
   closePanel();
@@ -1491,6 +2426,7 @@ function openPanel(name) {
   releaseMouse();
   clearInput();
   if (name === 'cheatPanel') updateCheatPanel();
+  if (name === 'debugPanel') renderDebugPanel();
   // Picture settings: keep the scene visible behind the panel.
   if (name === 'picturePanel') {
     show('#pause', false);
@@ -1523,6 +2459,8 @@ window.addEventListener('keydown', (e) => {
 let menuTab = 'play';
 function setTab(name) {
   menuTab = name;
+  lobby.picked = lobby.weapon = lobby.gear = null;
+  previewCosmetic(null);
   for (const b of document.querySelectorAll('[data-tab]')) {
     const on = b.dataset.tab === name;
     b.classList.toggle('active', on);
@@ -1696,7 +2634,8 @@ async function boot() {
     } catch {
       saveAvailable = false;
     }
-    view = new View($('#game'));
+    view = await startView();
+    const safe = safeGraphics();
     view.setGrade(grade);
     applyVideo();
     try {
@@ -1705,7 +2644,18 @@ async function boot() {
         $('#quality').value = q;
         view.setQuality(q);
       }
+      const c = localStorage.getItem('prida-camera');
+      if (c === 'first' || c === 'third') cameraView = c;
     } catch {}
+    if (safe) {
+      $('#quality').value = 'fast';
+      view.setQuality('fast');
+    }
+    applyCameraView(false);
+    $('#cameraView').onchange = () => {
+      cameraView = $('#cameraView').value === 'third' ? 'third' : 'first';
+      applyCameraView();
+    };
     // Compile every material's shaders during loading, so the first match frame does not stall.
     $('#loadStatus').textContent = 'Preparing shaders…';
     try {
@@ -1723,8 +2673,11 @@ async function boot() {
     } catch {}
     $('#endpoint').value = config.multiplayerUrl === 'auto' ? '' : config.multiplayerUrl || '';
     if (serverEndpoint()) $('#serverNote').textContent = 'Connected to this site’s PRIDA server. You can also enter another address.';
+    renderAccount();
+    syncAccount();
     show('#loading', false);
     show('#menu', true);
+    offerTutorial();
     requestAnimationFrame(frame);
     const join = (params) => {
       leave();
@@ -1736,13 +2689,57 @@ async function boot() {
       $('#room').value = roomCode(params.party);
       if (params.create || params.party) connectGroup(!!params.create);
     };
+    joinParty = join;
     const params = new URLSearchParams(location.search);
     if (params.has('party')) join({ party: params.get('party'), server: params.get('server') });
     portalJoin(join);
   } catch (e) {
-    $('#loadStatus').textContent = 'Unable to start 3D. A WebGL 2 browser is required. ' + e.message;
     console.error(e);
+    startFailed(e);
   }
+}
+// A browser can refuse a WebGL context for a moment while its graphics process restarts after a driver hiccup:
+// ask three times, a second or two apart, before giving up.
+async function startView() {
+  for (let attempt = 0; ; attempt++)
+    try {
+      return new View($('#game'));
+    } catch (e) {
+      if (!e.webgl || attempt >= 2) throw e;
+      $('#loadStatus').textContent = 'Waiting for the graphics driver…';
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+}
+// After the graphics context was lost last time (a driver crash, or too little video memory), start with lighter
+// settings: Fast, at most 75 % resolution, low textures. They are saved like any choice the player makes.
+function safeGraphics() {
+  let lost = 0;
+  try {
+    lost = +localStorage.getItem('prida-gl-lost') || 0;
+    localStorage.removeItem('prida-gl-lost');
+  } catch {}
+  if (!lost || Date.now() - lost > 7 * 86400e3) return false;
+  video.res = Math.min(video.res, 0.75);
+  if (video.tex === 'high' || video.tex === 'medium') video.tex = 'low';
+  try {
+    localStorage.setItem('blockyard-quality', 'fast');
+  } catch {}
+  $('#safeNote').hidden = false;
+  return true;
+}
+function startFailed(e) {
+  showHelp({ ...glAdvice(e?.webgl ? glSupport() : {}, e), detail: e?.message || String(e) });
+}
+// The loading screen turned into a help page: what happened, what to try, and a button that reloads.
+function showHelp({ title, text, steps, detail = '' }) {
+  show('#loading', true);
+  $('#loadStatus').textContent = 'Unable to start 3D.';
+  $('#startTitle').textContent = title;
+  $('#startText').textContent = text;
+  $('#startSteps').hidden = !steps;
+  $('#startDetail').textContent = detail ? 'Details: ' + detail : '';
+  $('#startHelp').hidden = false;
+  $('#startRetry').onclick = () => location.reload();
 }
 
 boot();
@@ -1761,10 +2758,20 @@ if (import.meta.env?.DEV)
     get latency() {
       return latency;
     },
+    get net() {
+      return { delay: interp.delay, gap: interp.gap, jitter: interp.jitter, prediction: { ...predictor.stats }, pending: predictor.pending.length };
+    },
     get view() {
       return view;
     },
     selectSlot,
+    lobby,
+    lobbyState: (party) => lobbyState(state, party),
+    frame: (t) => frame(t),
+    get flags() {
+      return { mode, paused, inventoryOpen, panel, mouse: mouse.down };
+    },
+    setTab: (name) => setTab(name),
     setLook(a, p = 0) {
       angle = a;
       pitch = p;

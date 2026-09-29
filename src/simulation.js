@@ -14,6 +14,12 @@ import {
   bestItem,
   restockAmmo,
   LOADOUT_CHOICES,
+  MAX_RARITY,
+  carryWeight,
+  wearArmor,
+  startSlots,
+  FISTS,
+  rollChest,
 } from './items.js';
 import { Navigation } from './navigation.js';
 import { BossSystem } from './bosses.js';
@@ -54,16 +60,22 @@ export function initPhysics() {
 }
 const clamp = (v, a, b) => Math.min(b, Math.max(a, Number.isFinite(v) ? v : 0));
 export class Arena {
-  constructor({ bots = 0, random = Math.random, seed = DEFAULT_SEED, mode = 'classic', allowCheats = false, size = 'district', bus = false, botEvery = 1 } = {}) {
+  constructor({ bots = 0, random = Math.random, seed = DEFAULT_SEED, mode = 'classic', allowCheats = false, size = 'district', bus = false, botEvery = 1, kit = 'fists' } = {}) {
+    // What a life starts with. Since 0.27 everyone starts with bare hands ('fists') and finds everything else;
+    // 'loadout' is the old start (the chosen weapons, gear and a medkit), kept for tests and experiments.
+    this.kit = kit === 'loadout' ? 'loadout' : 'fists';
     // Servers think for bots every `botEvery` steps (their last decision is reused in between) to save CPU.
     this.botEvery = Math.max(1, Math.round(botEvery));
     this.random = random;
     this.map = createWorld(seed, size);
     this.size = this.map.size;
     this.nav = new Navigation(this.map);
-    this.mode = ['survival', 'royale', 'duel'].includes(mode) ? mode : 'classic';
-    // Respawning modes: Training / Arena (first to 10) and Duel (1 v 1, first to 5).
-    this.respawns = this.mode === 'classic' || this.mode === 'duel';
+    // `debug` is the solo sandbox: no storm, no timer, every item on tap. The server never creates it (server.mjs
+    // builds arenas only from its own MODES table) and it turns rewards off, like any cheat.
+    // `tutorial` (0.27) is the solo walk-through: no storm, no timer, no rewards, target dummies (tutorial.js).
+    this.mode = ['survival', 'royale', 'duel', 'debug', 'tutorial'].includes(mode) ? mode : 'classic';
+    // Respawning modes: Training / Arena (first to 10), Duel (1 v 1, first to 5) and the debug sandbox.
+    this.respawns = this.mode === 'classic' || this.mode === 'duel' || this.mode === 'debug' || this.mode === 'tutorial';
     this.scoreLimit = this.mode === 'duel' ? 5 : 10;
     // Contenders: Mini Royale 10, the big city royale 24 (10 humans at most, the rest bots), duels 2.
     this.maxPlayers = this.mode === 'duel' ? 2 : this.mode === 'royale' ? (this.size === 'city' ? 24 : 10) : 64;
@@ -71,14 +83,26 @@ export class Arena {
     this.zoneStart = Math.round(140 * (this.map.limit.x / 104));
     this.royaleTime = this.size === 'city' ? 480 : 240;
     this.allowCheats = allowCheats;
-    this.cheated = false;
+    this.cheated = this.mode === 'debug';
     this.zone = { x: 0, z: 0, radius: this.zoneStart };
+    // A duel on the big city (0.28) is fought in a fixed ring round the city centre: step out and it hurts, and
+    // both players spawn inside it within sight range of each other.
+    if (this.mode === 'duel' && this.size === 'city') this.zone = { x: 0, z: 0, radius: 150, fixed: true };
     this.players = [];
     this.botCount = 0;
     this.bodies = new Map();
     this.time = this.mode === 'royale' ? this.royaleTime : 180;
     this.projectiles = [];
     this.projectileId = 0;
+    // C4 charges already stuck to the world, waiting for their owner's detonator.
+    this.charges = [];
+    this.chargeId = 0;
+    // Smoke clouds nobody can see through (smoke grenades).
+    this.smokes = [];
+    this.smokeId = 0;
+    // Things players set down (0.27): launch pads, cover walls, campfires.
+    this.deployables = [];
+    this.deployId = 0;
     this.chests = this.map.chests.map((c) => ({ ...c, loot: { ...c.loot } }));
     this.dropId = 0;
     this.round = 1;
@@ -282,8 +306,15 @@ export class Arena {
       return;
     }
     this.removeObs(o);
+    if (o.deploy !== undefined) {
+      const d = this.deployables.find((q) => q.id === o.deploy);
+      this.events.push({ ...info, kind: 'deploy' });
+      if (d) this.undeploy(d, true);
+      return;
+    }
     if (o.part === 'upper') {
       this.destruction.roofs.push(o.building);
+      this.dropRoofPlant(o.building);
       this.events.push({ ...info, kind: 'roof', building: o.building });
       return;
     }
@@ -307,7 +338,10 @@ export class Arena {
       if (isSlab(o) && b && (o.storey ?? 0) === (b.storeys || 0)) {
         const roof = this.map.obstacles.find((q) => q.building === b.id && q.part === 'upper');
         if (roof) this.breakObstacle(roof, attacker);
-        else if (!this.destruction.roofs.includes(b.id)) this.destruction.roofs.push(b.id);
+        else if (!this.destruction.roofs.includes(b.id)) {
+          this.destruction.roofs.push(b.id);
+          this.dropRoofPlant(b.id);
+        }
       }
       if (isSlab(o)) this.slabHoles(o, [...Array(cellGrid(o).cols * cellGrid(o).rows).keys()], attacker);
     } else if (o.decor !== undefined) {
@@ -316,6 +350,10 @@ export class Arena {
       // Whatever stood on it falls with it.
       for (const q of this.map.obstacles.filter((q) => q.restsOn === o.decor)) this.breakObstacle(q, attacker);
     }
+  }
+  // Parapets, plant and chimneys on a roof go with it (0.28).
+  dropRoofPlant(building) {
+    for (const q of this.map.obstacles.filter((q) => q.building === building && q.part === 'roofplant')) this.removeObs(q);
   }
   collapse(b, attacker) {
     if (b.collapsed) return;
@@ -362,8 +400,14 @@ export class Arena {
       gliding: false,
       thrusting: false,
       spin: 0,
-      medkits: 1,
+      medkits: 0,
       armor: 0,
+      armorTier: null,
+      using: null,
+      rush: 0,
+      stim: 0,
+      regen: null,
+      blinded: 0,
       interactHeld: false,
       healHeld: false,
       emoteHeld: false,
@@ -381,6 +425,7 @@ export class Arena {
       jumpHeld: false,
       relic: null,
       frozen: 0,
+      webbed: 0,
       flashback: 0,
       portalCd: 0,
       push: null,
@@ -473,16 +518,27 @@ export class Arena {
     const b = this.bodies.get(id);
     if (b) this.world.removeRigidBody(b.body);
     this.bodies.delete(id);
+    // Long-running server rooms: the lag-compensation trail of someone who left must not stay behind.
+    this.trails?.delete(id);
     this.players = this.players.filter((p) => p.id !== id);
   }
   spawn(p) {
     let best = this.map.spawns[0],
-      distance = -1;
-    const start = Math.floor(this.random() * this.map.spawns.length);
+      distance = -Infinity;
+    const start = Math.floor(this.random() * this.map.spawns.length),
+      others = this.players.filter((o) => o.id !== p.id && o.hp > 0),
+      // Never into a boss's lair while there is anywhere else to go.
+      lairs = (this.bosses?.list || []).filter((b) => b.hp > 0);
+    const ring = this.zone.fixed ? this.zone : null;
     for (let i = 0; i < this.map.spawns.length; i++) {
       const s = this.map.spawns[(i + start) % this.map.spawns.length];
-      const others = this.players.filter((o) => o.id !== p.id && o.hp > 0);
-      const d = others.length ? Math.min(...others.map((o) => Math.hypot(o.x - s[0], o.z - s[1]))) : 50;
+      let d = others.length ? Math.min(...others.map((o) => Math.hypot(o.x - s[0], o.z - s[1]))) : 50;
+      if (lairs.some((b) => Math.hypot(b.home.x - s[0], b.home.z - s[1]) < 30)) d -= 1000;
+      // In the ring: inside it, and 40–90 m from the other player (not across the whole city).
+      if (ring) {
+        if (Math.hypot(s[0] - ring.x, s[1] - ring.z) > ring.radius - 15) d -= 2000;
+        else if (others.length) d = 100 - Math.abs(d - 65);
+      }
       if (d > distance) {
         distance = d;
         best = s;
@@ -498,15 +554,22 @@ export class Arena {
     p.hp = p.bot ? 80 : 100;
     p.respawn = 0;
     p.shield = 2;
-    p.slots = loadoutSlots(p.loadout);
-    p.slot = 1;
+    const loadout = this.kit === 'loadout';
+    p.slots = loadout ? loadoutSlots(p.loadout) : startSlots();
+    p.slot = loadout ? 1 : 0;
     this.syncHeld(p);
     if (p.cheats?.bazooka) this.giveBazooka(p);
-    p.gear = makeGear(p.loadout.gear);
+    p.gear = loadout ? makeGear(p.loadout.gear) : null;
     p.gliding = p.thrusting = false;
     p.spin = 0;
-    p.medkits = 1;
+    p.medkits = loadout ? 1 : 0;
+    p.using = null;
+    p.rush = p.stim = 0;
+    p.regen = null;
     p.armor = 0;
+    p.armorTier = null;
+    p.blinded = 0;
+    p.webbed = 0;
     p.healing = 0;
     p.reload = 0;
     p.cooldown = 0.3;
@@ -536,6 +599,9 @@ export class Arena {
   input(id, i) {
     const p = this.players.find((p) => p.id === id);
     if (!p || !i || typeof i !== 'object') return;
+    // An input overtaken by a newer one (the direct-play link is lossy and unordered) is dropped: the newer one
+    // repeats its one-shot presses.
+    if (Number.isInteger(i.seq) && i.seq <= (p.inputSeq || 0)) return;
     // Several inputs can arrive between two steps online: one-shot presses are kept until a step has seen them.
     const held = p.inputAge === 0 ? p.input : {},
       once = (k) => i[k] === true || held[k] === true;
@@ -556,10 +622,42 @@ export class Arena {
       ability2: i.ability2 === true,
       emote: once('emote'),
       dash: once('dash'),
+      detonate: once('detonate'),
     };
-    // Round-trip time the client measured (ms), used to rewind targets for its shots (lag compensation).
+    // Round-trip time the client measured (ms), used to rewind targets for its shots (lag compensation), and how far
+    // in the past the client shows other players (its interpolation delay).
     if (Number.isFinite(i.lag)) p.lag = clamp(i.lag, 0, 400);
+    if (Number.isFinite(i.interp)) p.interp = clamp(i.interp, 0, 200);
+    // The input's sequence number: acknowledged in the state after the step that applies it (netcode.js Predictor).
+    if (Number.isInteger(i.seq) && i.seq > (p.inputSeq || 0)) p.inputSeq = i.seq;
     p.inputAge = 0;
+  }
+  // Debug sandbox only (solo; the server never runs this mode): hand the player any weapon, gear or supply.
+  debugGive(id, what = {}) {
+    const p = this.players.find((q) => q.id === id);
+    if (this.mode !== 'debug' || !p || p.bot) return false;
+    if (Number.isInteger(what.weapon) && WEAPONS[what.weapon]) {
+      const item = makeItem(what.weapon, Math.max(0, Math.min(MAX_RARITY, what.rarity ?? 0)));
+      if (WEAPONS[what.weapon].melee) p.slots[0] = item;
+      else addItem(p, item);
+      this.syncHeld(p);
+      p.reload = 0;
+    }
+    if (what.gear !== undefined) p.gear = what.gear ? makeGear(what.gear) : null;
+    if (what.medkits) p.medkits = Math.min(5, p.medkits + what.medkits);
+    if (what.armor) p.armor = Math.min(100, p.armor + what.armor);
+    if (what.heal) p.hp = 100;
+    if (what.ammo) restockAmmo(p, 1);
+    return true;
+  }
+  // Debug sandbox only: target bots on demand.
+  debugBots(count = 0) {
+    if (this.mode !== 'debug') return 0;
+    if (count > 0)
+      for (let i = 0; i < count; i++)
+        this.addPlayer('dbg' + ++this.botCount, ['MICA', 'FLINT', 'SAGE', 'EMBER', 'COBALT', 'ONYX', 'JUNO', 'REED'][this.botCount % 8], true, { force: true });
+    else for (const p of this.players.filter((q) => q.bot)) this.removePlayer(p.id);
+    return this.players.filter((p) => p.bot).length;
   }
   setCheat(id, key, on) {
     const p = this.players.find((p) => p.id === id);
@@ -643,6 +741,7 @@ export class Arena {
     if (d > 27 || ((dx * Math.sin(p.angle) + dz * Math.cos(p.angle)) / Math.max(d, 0.01) < -0.15 && d > 4))
       return false;
     if (!lineClear(p, o, 0, this.map.obstacles)) return false;
+    if (this.smoked(p, o)) return false;
     const origin = { x: p.x, y: p.y + 1.4, z: p.z },
       dy = o.y - p.y,
       n = Math.hypot(dx, dy, dz);
@@ -661,7 +760,7 @@ export class Arena {
   syncHeld(p) {
     if (!p.slots[p.slot]) p.slot = p.slots.findIndex((s) => s);
     const item = p.slots[p.slot];
-    p.weapon = item ? item.w : 7;
+    p.weapon = item ? item.w : FISTS;
     p.rarity = item ? item.r : 0;
   }
   held(p) {
@@ -675,9 +774,12 @@ export class Arena {
     for (let i = 1; i < p.slots.length; i++) {
       const s = p.slots[i];
       if (!s || s.ammo + s.reserve <= 0) continue;
+      // Items are used when calm (botItem), and the impulse grenade does no damage.
+      if (WEAPONS[s.w].consumable || WEAPONS[s.w].projectile === 'impulse') continue;
       const w = WEAPONS[s.w],
         fit = distance < Infinity ? -Math.abs(Math.min(w.range, 40) * 0.45 - Math.min(distance, 40)) : 0;
-      const value = fit + s.r * 3 + (w.projectile === 'rocket' && distance < 7 ? -50 : 0);
+      // Bots have no detonator button, so a demolition charge is their last resort.
+      const value = fit + s.r * 3 + (w.projectile === 'rocket' && distance < 7 ? -50 : 0) + (w.sticky || w.fuse ? -40 : 0);
       if (value > score) {
         score = value;
         best = i;
@@ -685,9 +787,32 @@ export class Arena {
     }
     return best > 0 ? best : 0;
   }
+  // A bot out of a fight patches itself up with what it carries: shields when its armour is low, heals when hurt.
+  botItem(p) {
+    let best = -1,
+      score = 0;
+    for (let i = 1; i < p.slots.length; i++) {
+      const s = p.slots[i],
+        w = s && WEAPONS[s.w];
+      if (!w?.consumable || w.deploy || s.ammo <= 0 || this.useBlocked(p, w)) continue;
+      const e = w.effect || {},
+        gain = (e.armor ? Math.min(e.armor, (e.armorCap ?? 100) - p.armor) : 0) + (e.hp ? Math.min(e.hp, (e.hpCap ?? 100) - p.hp) : 0) + (e.regen ? 30 : 0);
+      if (gain > score + 4) {
+        score = gain;
+        best = i;
+      }
+    }
+    return score >= 12 ? best : -1;
+  }
+  // Is anything in the belt a weapon? (Bots with bare hands go looking for one first.)
+  armed(p) {
+    return p.slots.some((s, k) => k > 0 && s && !WEAPONS[s.w].consumable && WEAPONS[s.w].projectile !== 'impulse' && s.ammo + s.reserve > 0);
+  }
   // Bot AI: squads share what they see, keep formation around a leader, take cover when hurt or reloading,
   // loot nearby chests when calm, and fall back toward the storm centre in Mini Royale.
   botInput(p, dt) {
+    // Tutorial targets stand still and never fight back.
+    if (p.dummy) return { x: 0, z: 0, angle: p.angle, pitch: 0, fire: false };
     const b = p.brain,
       now = this.tick / 60;
     b.timer -= dt;
@@ -891,9 +1016,11 @@ export class Arena {
         .sort((m, n) => Math.hypot(m.x - p.x, m.z - p.z) - Math.hypot(n.x - p.x, n.z - p.z))[0];
       if (fighting && Math.hypot(fighting.x - p.x, fighting.z - p.z) > 6) goal = { x: fighting.x, z: fighting.z };
       if (b.memory > 0 && b.lastSeen) goal = b.lastSeen;
-      if (!goal && !this.respawns) {
-        const chest = this.chests
-          .filter((c) => !c.opened && c.by !== p.id && Math.hypot(c.x - p.x, c.z - p.z) < 18)
+      const unarmed = !this.armed(p);
+      if ((!goal || unarmed) && (!this.respawns || unarmed || this.kit !== 'loadout')) {
+        const reach = unarmed ? 90 : this.respawns ? 30 : 18,
+          chest = this.chests
+          .filter((c) => !c.opened && !c.high && c.by !== p.id && Math.hypot(c.x - p.x, c.z - p.z) < reach)
           .sort((a, c) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(c.x - p.x, c.z - p.z))[0];
         if (chest) {
           goal = chest;
@@ -944,6 +1071,12 @@ export class Arena {
     const ability = this.bosses.botChoice(p, target, distance),
       // Out of contact and hurt: stand still and patch up before looking for the next fight.
       wantHeal = !target && b.memory <= 0 && p.hp < 60 && p.medkits > 0;
+    // Calm: drink a shield or put a bandage on (keeping that slot in hand until it is done).
+    const use = !target && b.memory <= 0 && !wantHeal ? (p.using ? p.using.slot : this.botItem(p)) : -1;
+    if (use > 0) {
+      b.useToggle = !b.useToggle;
+      return { x: 0, z: 0, angle: p.angle, pitch: 0, slot: use, fire: p.slot === use && !p.using && b.useToggle, sprint: false };
+    }
     if (wantHeal || p.healing > 0) move = { x: 0, z: 0 };
     return {
       ...move,
@@ -973,6 +1106,9 @@ export class Arena {
         this.round++;
         this.chests = this.map.chests.map((c) => ({ ...c, loot: { ...c.loot } }));
         this.projectiles = [];
+        this.charges = [];
+        this.smokes = [];
+        for (const d of [...this.deployables]) this.undeploy(d);
         for (const p of this.players) {
           p.score = 0;
           p.deaths = 0;
@@ -981,13 +1117,15 @@ export class Arena {
       }
       return;
     }
-    if (this.players.length > 1 && this.mode !== 'survival') this.time = Math.max(0, this.time - dt);
+    if (this.players.length > 1 && this.mode !== 'survival' && this.mode !== 'debug' && this.mode !== 'tutorial') this.time = Math.max(0, this.time - dt);
     if (this.mode === 'royale')
       this.zone.radius =
         this.zoneStart * Math.max(0, 1 - Math.max(0, this.royaleTime - this.time - (this.zoneDelay || 20)) / (this.royaleTime - (this.zoneDelay || 20)));
     this.stepBus(dt);
     for (const p of this.players) {
       p.inputAge += dt;
+      // Everything the client has sent so far is applied by this step (the latest input stands for all of them).
+      if (!p.bot) p.ack = p.inputSeq;
       if (p.inBus) continue;
       if (p.hp <= 0) {
         if (this.respawns) {
@@ -1057,6 +1195,17 @@ export class Arena {
         if (i.fire || i.jump || i.reload || Math.hypot(i.x || 0, i.z || 0) > 0.05 || p.hp <= 0) p.emote = 0;
         else p.emote = Math.max(0, p.emote - dt);
       }
+      this.stepBuffs(p, dt);
+      // An item being used: switching slots (or losing the item) cancels it; otherwise it finishes on time.
+      if (p.using) {
+        if (p.using.slot !== p.slot || !item || item.w !== p.using.w || item.ammo <= 0) {
+          p.using = null;
+          this.events.push({ type: 'use-cancel', id: p.id });
+        } else {
+          p.using.t = Math.max(0, p.using.t - dt);
+          if (p.using.t === 0) this.finishUse(p, item);
+        }
+      }
       if (p.healing > 0) {
         if (i.fire || i.sprint) {
           p.healing = 0;
@@ -1076,12 +1225,14 @@ export class Arena {
       x /= n;
       z /= n;
       if (p.stamina >= 25) p.sprintLocked = false;
-      p.sprinting = !!i.sprint && !i.fire && !p.sprintLocked && p.stamina > 0 && Math.hypot(x, z) > 0.1;
+      p.sprinting = !!i.sprint && !i.fire && !p.using && !p.sprintLocked && p.stamina > 0 && Math.hypot(x, z) > 0.1;
       p.stamina = clamp(
         p.stamina + (p.sprinting ? -25 * (p.perks?.drain ?? 1) : 18 * (p.perks?.regen ?? 1)) * dt,
         0,
         100,
       );
+      // STIM: stamina never runs out while it lasts.
+      if (p.stim > 0) p.stamina = 100;
       if (p.stamina === 0) p.sprintLocked = true;
       if (i.jump && !p.jumpHeld && p.grounded) {
         p.vy = 7.8 * (p.perks?.jump || 1);
@@ -1089,8 +1240,11 @@ export class Arena {
       }
       p.jumpHeld = !!i.jump;
       // DASH (MOBILITY 10): a burst in the direction you are moving, or forward when standing still.
+      // Edge-triggered like jump: a stale input that still says "pressed" (a lagging connection) never dashes twice.
       p.dashCd = Math.max(0, (p.dashCd || 0) - dt);
-      if (i.dash && p.perks?.dash && p.dashCd <= 0 && p.hp > 0 && !p.inBus && !p.dropping && !p.healing) {
+      const dashPress = i.dash && !p.dashHeld;
+      p.dashHeld = !!i.dash;
+      if (dashPress && p.perks?.dash && p.dashCd <= 0 && p.hp > 0 && !p.inBus && !p.dropping && !p.healing) {
         const has = Math.hypot(x, z) > 0.05,
           ax = has ? x * Math.cos(p.angle) + z * Math.sin(p.angle) : Math.sin(p.angle),
           az = has ? -x * Math.sin(p.angle) + z * Math.cos(p.angle) : Math.cos(p.angle),
@@ -1121,7 +1275,9 @@ export class Arena {
       // Dropping from the bus: fast free fall, then a glide from 22 m above the ground until landing.
       if (p.dropping) {
         const above = p.y - groundHeight(p.x, p.z, this.map);
-        if (above > 22) p.vy = Math.max(p.vy, -26);
+        // Thrown up by a launch pad: no glider on the way up.
+        if (p.launched && p.vy > 0) p.gliding = false;
+        else if (above > 22) p.vy = Math.max(p.vy, -26);
         else {
           p.vy = Math.max(p.vy, -5);
           p.gliding = true;
@@ -1141,8 +1297,14 @@ export class Arena {
           ? 13
           : (p.gliding ? 10 : p.sprinting ? 9 : 5.8) *
             (p.healing > 0 ? 0.35 : 1) *
+            // Walking while drinking or bandaging; RUSH makes you quicker.
+            (p.using ? 0.55 : 1) *
+            (p.rush > 0 && !p.gliding ? 1.3 : 1) *
+            // Caught in the brood mother's web: a crawl until it tears.
+            (p.webbed > 0 && !p.dropping ? 0.45 : 1) *
             (p.gliding ? 1 : w.move || 1) *
-            (p.gliding ? 1 : p.perks?.speed || 1),
+            (p.gliding ? 1 : p.perks?.speed || 1) *
+            (p.gliding || p.dropping ? 1 : carryWeight(p)),
         push = p.push || { x: 0, z: 0 };
       // Knock-back and portal flings fade out over about a second.
       if (p.push) {
@@ -1162,10 +1324,31 @@ export class Arena {
       p.y = clamp(p.y + m.y, 0, p.dropping ? 60 : 32);
       p.grounded = this.controller.computedGrounded();
       if (p.grounded || (p.vy > 0 && m.y < p.vy * dt - 0.001)) p.vy = 0;
-      if (p.grounded) p.gliding = p.dropping = false;
+      if (p.grounded) p.gliding = p.dropping = p.launched = false;
       p.moving = Math.hypot(m.x, m.z) / dt;
       body.body.setTranslation({ x: p.x, y: p.y + 0.84, z: p.z }, false);
       body.body.setNextKinematicTranslation({ x: p.x, y: p.y + 0.84, z: p.z });
+      // C4: the detonator fires every charge this player has placed, whatever they are holding now (once per press).
+      if (i.detonate && !p.detonateHeld) this.detonate(p);
+      p.detonateHeld = !!i.detonate;
+      // Items: a press of the fire button starts using the one in your hands.
+      // Holding the button through a weapon switch still counts; after one use, let go before the next.
+      if (!i.fire) p.useArmed = true;
+      if (w.consumable) {
+        if (i.fire && p.useArmed !== false && !p.using && p.cooldown === 0 && !p.healing && item?.ammo > 0) {
+          const blocked = this.useBlocked(p, w);
+          if (!blocked) {
+            p.using = { slot: p.slot, w: p.weapon, t: w.use, time: w.use };
+            p.useArmed = false;
+            p.emote = 0;
+            p.reload = 0;
+            this.events.push({ type: 'use-start', id: p.id, item: p.weapon });
+          } else if (!p.fireHeld) this.events.push({ type: 'use-blocked', id: p.id, why: blocked });
+        }
+        p.fireHeld = !!i.fire;
+        continue;
+      }
+      p.fireHeld = !!i.fire;
       if (w.melee) {
         if (i.fire && p.cooldown === 0 && !p.healing) this.melee(p);
         continue;
@@ -1202,12 +1385,25 @@ export class Arena {
       if (t.length > Math.ceil(0.4 / dt)) t.shift();
     }
     this.stepProjectiles(dt);
+    this.stepCharges(dt);
+    this.stepSmoke(dt);
+    this.stepDeployables(dt);
     this.bosses.step(dt);
+    // Respawning modes restock: an opened chest closes again, with new contents, 45 s later.
+    if (this.respawns && this.tick % 30 === 0)
+      for (const c of this.chests)
+        if (c.opened && c.kind !== 'drop' && this.tick - (c.openedAt ?? this.tick) > 45 * 60) {
+          Object.assign(c, rollChest(this.random, c.tier), { opened: false, openedAt: undefined });
+          this.events.push({ type: 'chest-refill', chest: c.id, x: c.x, y: c.y || 0, z: c.z });
+        }
     if (this.navDirty && this.tick % 20 === 0) {
       this.navDirty = false;
       this.nav = new Navigation(this.map);
       for (const p of this.players) if (p.bot) p.brain.pathTimer = 0;
     }
+    if (this.zone.fixed)
+      for (const p of this.players)
+        if (p.hp > 0 && Math.hypot(p.x - this.zone.x, p.z - this.zone.z) > this.zone.radius) this.damage(null, p, 10 * dt);
     if (this.mode === 'royale') {
       for (const p of this.players)
         if (p.hp > 0 && Math.hypot(p.x - this.zone.x, p.z - this.zone.z) > this.zone.radius)
@@ -1230,7 +1426,7 @@ export class Arena {
           this.events.push({ type: 'end' });
         }
       }
-    } else {
+    } else if (this.mode !== 'debug' && this.mode !== 'tutorial') {
       const winner = this.players.find((p) => p.score >= this.scoreLimit);
       if (winner || this.time <= 0) {
         this.winner = winner?.id || [...this.players].sort((a, b) => b.score - a.score)[0]?.id || '';
@@ -1276,7 +1472,7 @@ export class Arena {
     const eyeRay = this.bosses.ray({ x: p.x, y: p.y + EYE_HEIGHT, z: p.z }, direction(p.angle, p.pitch), w.range + 1.2);
     if (eyeRay && (!victim || eyeRay.distance < best)) {
       victim = null;
-      this.bosses.damage(eyeRay.boss, w.damage * (p.relic?.id === 'gloves' ? 5 : 1.2) * (p.perks?.melee || 1), p);
+      this.bosses.damage(eyeRay.boss, w.damage * 1.2 * (p.perks?.melee || 1), p);
       this.events.push({ type: 'melee', id: p.id, weapon: p.weapon, hit: true, wall: null, x: eyeRay.boss.x, y: eyeRay.boss.y + 1.6, z: eyeRay.boss.z, shot: p.shot });
       return;
     }
@@ -1309,13 +1505,10 @@ export class Arena {
       shot: p.shot,
     });
     if (victim) {
-      // TITAN GLOVES: the blow lands like the colossus' own — one hit, one kill.
-      // CYBER STRIKE (STRENGTH 10): one blow in three does the same.
-      const titan = p.relic?.id === 'gloves',
-        cyber = !titan && p.perks?.cyber && this.random() < 0.3;
-      if (titan || cyber)
-        this.events.push({ type: 'crit', id: p.id, victim: victim.id, cyber, x: victim.x, y: victim.y + 1.1, z: victim.z });
-      this.damage(p, victim, titan || cyber ? 999 : Math.round(w.damage * (p.bot ? 0.5 : 1) * (p.perks?.melee || 1)));
+      // CYBER STRIKE (STRENGTH 10): one blow in three lands as a one-hit kill.
+      const cyber = p.perks?.cyber && this.random() < 0.3;
+      if (cyber) this.events.push({ type: 'crit', id: p.id, victim: victim.id, cyber, x: victim.x, y: victim.y + 1.1, z: victim.z });
+      this.damage(p, victim, cyber ? 999 : Math.round(w.damage * (p.bot ? 0.5 : 1) * (p.perks?.melee || 1)));
       this.alert(p, w);
     }
   }
@@ -1404,13 +1597,14 @@ export class Arena {
         this.chipWall(impact.obstacle, { x: p.x + dir.x * distance, y: origin.y + dir.y * distance, z: p.z + dir.z * distance }, dir, w.damage, p);
     }
   }
-  // Where the shooter saw a target: online players see others about half a round trip plus one packet late, so
-  // their hitscan shots are checked against positions that far back (capped at 250 ms).
+  // Where the shooter saw a target: a state takes half a round trip to reach them, is shown `interp` ms late
+  // (netcode.js Interpolator) and the shot takes the other half back, so hitscan shots are checked against
+  // positions a round trip plus that delay back (capped at 350 ms; the trails keep 0.4 s).
   seenAt(shooter, o) {
     if (shooter.bot || !shooter.lag) return o;
     const trail = this.trails?.get(o.id);
     if (!trail?.length) return o;
-    const back = Math.round(Math.min(250, shooter.lag / 2 + 50) / 1000 / (this.stepDt || 1 / 60)),
+    const back = Math.round(Math.min(350, shooter.lag + (shooter.interp ?? 50)) / 1000 / (this.stepDt || 1 / 60)),
       k = Math.max(0, trail.length - 1 - back),
       at = trail[k];
     return at.alive ? at : o;
@@ -1428,6 +1622,8 @@ export class Arena {
   setLoadout(p, loadout = null) {
     if (Number.isInteger(loadout)) loadout = { ...p.loadout, primary: loadout };
     p.loadout = sanitizeLoadout(loadout);
+    // The chosen loadout only arms a player in the 'loadout' kit; otherwise it is kept for the lobby.
+    if (this.kit !== 'loadout') return;
     p.slots = loadoutSlots(p.loadout);
     p.slot = 1;
     this.syncHeld(p);
@@ -1451,6 +1647,7 @@ export class Arena {
       reserve: contents.loot?.reserve,
       medkits: contents.medkits || 0,
       armor: contents.armor || 0,
+      plate: contents.plate || null,
       gear: contents.gear || null,
       opened: false,
       by,
@@ -1458,7 +1655,7 @@ export class Arena {
     this.chests.push(drop);
     // Keep the loot list bounded in long Training sessions.
     const drops = this.chests.filter((c) => c.kind === 'drop');
-    if (drops.length > 40) this.chests.splice(this.chests.indexOf(drops[0]), 1);
+    if (drops.length > 90) this.chests.splice(this.chests.indexOf(drops[0]), 1);
     return drop;
   }
   openChest(p) {
@@ -1469,11 +1666,14 @@ export class Arena {
           !c.opened &&
           !(p.bot && c.by === p.id) &&
           Math.hypot(c.x - p.x, c.z - p.z) < 2.8 &&
+          // Same level: a roof chest is not opened from the storey below.
+          Math.abs((c.y || 0) - (p.y || 0)) < 1.8 &&
           lineClear(p, c, 0, this.map.obstacles),
       )
       .sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
     if (!c) return false;
     c.opened = true;
+    c.openedAt = this.tick;
     let result = { slot: -1, dropped: null };
     if (c.loot) {
       const item = makeItem(c.loot.w, c.loot.r);
@@ -1486,9 +1686,23 @@ export class Arena {
       if (result.slot === p.slot || !this.held(p)) p.reload = 0;
       this.syncHeld(p);
     }
+    // The item a chest holds on top of its weapon: into a free slot or its stack, else onto the ground by the chest.
+    let extraTaken = false;
+    if (c.extra && WEAPONS[c.extra.w]) {
+      const ex = makeItem(c.extra.w, c.extra.r),
+        wx = WEAPONS[ex.w],
+        stack = p.slots.some((q, k) => k > 0 && q?.w === ex.w && (!wx.consumable || q.ammo < wx.mag)),
+        free = p.slots.some((q, k) => k > 0 && !q);
+      if (stack || free) {
+        addItem(p, ex);
+        this.syncHeld(p);
+        extraTaken = true;
+      } else this.dropLoot(c.x + Math.sin(p.angle + 2) * 0.9, c.z + Math.cos(p.angle + 2) * 0.9, { loot: ex }, null);
+    }
     restockAmmo(p);
     p.medkits = Math.min(5, p.medkits + (c.medkits || 0));
     p.armor = Math.min(100, p.armor + (c.armor || 0));
+    if (c.plate) wearArmor(p, c.plate);
     let oldGear = null;
     if (c.gear && p.gear?.id !== c.gear) {
       oldGear = p.gear?.id || null;
@@ -1508,7 +1722,13 @@ export class Arena {
       weapon: c.loot?.w ?? null,
       rarity: c.loot?.r ?? 0,
       gear: c.gear || null,
+      extra: c.extra?.w ?? null,
+      extraTaken,
       unlocked: !!c.loot && !result.merged,
+      x: c.x,
+      y: c.y || 0,
+      z: c.z,
+      tier: c.tier || c.kind,
     });
     return true;
   }
@@ -1529,9 +1749,31 @@ export class Arena {
     // (Damage-over-time comes in fractions of a point, so this must not round.)
     amount = amount * (attacker && attacker !== victim ? attacker.perks?.damage || 1 : 1) * (victim.perks?.taken || 1);
     if (amount <= 0) return;
+    // A ballistic shield stops most of what comes at its face, until it gives way.
+    const guard = victim.gear?.id === 'shield' && victim.gear.hp > 0 ? GEAR.find((g) => g.id === 'shield') : null;
+    if (guard && attacker && attacker !== victim) {
+      const to = { x: attacker.x - victim.x, z: attacker.z - victim.z },
+        len = Math.hypot(to.x, to.z) || 1,
+        facing = (to.x * Math.sin(victim.angle) + to.z * Math.cos(victim.angle)) / len;
+      if (facing > 0.34) {
+        const stopped = Math.min(victim.gear.hp, amount * guard.block);
+        victim.gear.hp -= stopped;
+        amount -= stopped;
+        this.events.push({ type: 'guard', id: victim.id, hp: Math.max(0, Math.round(victim.gear.hp)), x: victim.x, y: victim.y + 1.2, z: victim.z });
+        if (victim.gear.hp <= 0) {
+          victim.gear = null;
+          this.events.push({ type: 'guard-break', id: victim.id, x: victim.x, y: victim.y + 1.1, z: victim.z });
+        }
+        if (amount < 0.5) return;
+      }
+    }
     const absorbed = Math.min(victim.armor, Math.round(amount * 0.5));
     victim.armor -= absorbed;
+    if (absorbed > 0 && victim.armor <= 0) this.events.push({ type: 'armor-break', id: victim.id, x: victim.x, y: victim.y + 1.2, z: victim.z });
     victim.hp = Math.max(0, victim.hp - amount + absorbed);
+    // Damage numbers over the target, for the player who dealt them (humans only: bots need none).
+    if (attacker && !attacker.bot && attacker !== victim)
+      this.events.push({ type: 'dmg', by: attacker.id, id: victim.id, n: Math.round(amount), armor: absorbed > 0, x: victim.x, y: victim.y + 2, z: victim.z });
     victim.healing = 0;
     if (victim.hp === 0) {
       victim.respawn = this.respawns ? 3 : 0;
@@ -1541,20 +1783,35 @@ export class Arena {
       if (attacker && attacker !== victim) attacker.score++;
       this.events.push({ type: 'kill', by: attacker?.id || byBoss || victim.id, victim: victim.id, weapon: attacker?.weapon });
       this.bosses.onDeath(victim);
-      if (this.mode === 'royale' || (this.mode === 'survival' && victim.bot))
-        this.dropLoot(victim.x, victim.z, {
-          loot: bestItem(victim.slots),
-          medkits: 1,
-          armor: 15,
-          gear: victim.gear?.id || null,
+      victim.using = victim.regen = null;
+      victim.rush = victim.stim = 0;
+      // Everything they carried spills around them (never bare hands). Survival: only bots drop.
+      if (this.mode !== 'survival' || victim.bot) {
+        const items = [...victim.slots.slice(1), victim.slots[0]].filter((s) => s && !WEAPONS[s.w].fists);
+        const first = items.shift() || null;
+        // Nothing but bare hands and no supplies: nothing to leave behind.
+        if (first || victim.medkits > 0 || victim.armorTier || victim.gear)
+          this.dropLoot(victim.x, victim.z, {
+            loot: first,
+            medkits: victim.medkits > 0 ? 1 : 0,
+            armor: 0,
+            plate: victim.armorTier,
+            gear: victim.gear?.id || null,
+          });
+        items.forEach((it, k) => {
+          const a = victim.angle + ((k + 1) / (items.length + 1)) * Math.PI * 2;
+          this.dropLoot(victim.x + Math.sin(a) * 1.1, victim.z + Math.cos(a) * 1.1, { loot: it });
         });
+      }
     }
   }
-  // Area damage to players (occluded by walls) and to destructible structures and props.
-  blast(x, y, z, radius, damage, owner, cause = 'explosion', source = null) {
-    this.events.push({ type: 'explosion', x, y, z, id: owner?.id, radius, cause });
-    this.bosses?.blast(x, y, z, radius, damage, owner);
-    for (const p of this.players) {
+  // Area damage to players (occluded by walls) and to destructible structures and props. A boss's own blasts
+  // hurt players themselves (credited to the boss) and pass { players: false, bosses: false }; spikes are `silent`
+  // (they draw their own effect instead of an explosion).
+  blast(x, y, z, radius, damage, owner, cause = 'explosion', source = null, { players = true, bosses = true, silent = false } = {}) {
+    if (!silent) this.events.push({ type: 'explosion', x, y, z, id: owner?.id, radius, cause });
+    if (bosses) this.bosses?.blast(x, y, z, radius, damage, owner);
+    for (const p of players ? this.players : []) {
       const d = Math.hypot(p.x - x, p.y + 0.9 - y, p.z - z);
       if (p.hp <= 0 || d > radius) continue;
       if (owner && owner !== p && owner.team === p.team) continue;
@@ -1612,10 +1869,133 @@ export class Arena {
       owner,
     );
   }
+  // Does a cloud of smoke sit between two points? (Bots cannot see through it; bullets still fly through.)
+  smoked(a, b) {
+    if (!this.smokes.length) return false;
+    const ax = a.x,
+      az = a.z,
+      dx = b.x - ax,
+      dz = b.z - az,
+      len = Math.hypot(dx, dz) || 1e-6;
+    for (const s of this.smokes) {
+      // Distance from the smoke centre to the segment.
+      const t = Math.max(0, Math.min(1, ((s.x - ax) * dx + (s.z - az) * dz) / (len * len))),
+        px = ax + dx * t,
+        pz = az + dz * t;
+      if (Math.hypot(s.x - px, s.z - pz) < s.r * s.grow) return true;
+    }
+    return false;
+  }
+  // A flashbang: everyone who can see it go off is blinded for a moment, bots included.
+  flash(x, y, z, w, owner) {
+    this.events.push({ type: 'flashbang', x, y, z, radius: w.radius, id: owner?.id });
+    for (const p of this.players) {
+      if (p.hp <= 0 || p.cheats.god) continue;
+      const d = Math.hypot(p.x - x, p.y + 1.4 - y, p.z - z);
+      if (d > w.radius) continue;
+      if (!lineClear({ x, z }, p, 0, this.map.obstacles)) continue;
+      // Looking at it is worse than having it behind you.
+      const to = { x: x - p.x, z: z - p.z },
+        len = Math.hypot(to.x, to.z) || 1,
+        facing = (to.x * Math.sin(p.angle) + to.z * Math.cos(p.angle)) / len,
+        time = (1 - d / w.radius) * (facing > 0 ? 3.2 : 1.4);
+      if (time < 0.25) continue;
+      p.blinded = Math.max(p.blinded || 0, time);
+      if (p.bot) p.brain.memory = 0;
+    }
+  }
+  // A grenade that has run out of fuse: fragments, light or smoke.
+  detonateGrenade(r, w, owner) {
+    if (w.projectile === 'flash') this.flash(r.x, r.y, r.z, w, owner);
+    else if (w.projectile === 'impulse') this.impulse(r.x, r.y + 0.3, r.z, w, owner);
+    else if (w.projectile === 'smoke') {
+      const s = { id: ++this.smokeId, x: r.x, y: r.y, z: r.z, r: w.radius, t: w.smoke || 12, grow: 0.2 };
+      this.smokes.push(s);
+      this.events.push({ type: 'smoke', id: s.id, x: s.x, y: s.y, z: s.z, radius: s.r, time: s.t });
+    } else this.explode(r, w, owner);
+  }
+  stepSmoke(dt) {
+    for (let i = this.smokes.length - 1; i >= 0; i--) {
+      const s = this.smokes[i];
+      s.t -= dt;
+      // The cloud billows out over a second and thins away at the end.
+      s.grow = Math.min(1, s.grow + dt * 1.1) * Math.min(1, Math.max(0.15, s.t / 2));
+      if (s.t <= 0) this.smokes.splice(i, 1);
+    }
+    for (const p of this.players) if (p.blinded > 0) p.blinded = Math.max(0, p.blinded - dt);
+  }
+  // A thrown charge sticks to the surface it hit, its face turned along the surface normal.
+  placeCharge(r, impact, w) {
+    const max = Math.max(1, WEAPONS[r.weapon].charges || 4),
+      mine = this.charges.filter((c) => c.owner === r.owner);
+    // Only the newest charges stay armed; placing one more drops the oldest.
+    for (let k = 0; k <= mine.length - max; k++) this.charges.splice(this.charges.indexOf(mine[k]), 1);
+    const n = impact && Number.isFinite(impact.x) ? impact : { x: 0, y: 1, z: 0 },
+      c = {
+        id: ++this.chargeId,
+        owner: r.owner,
+        weapon: r.weapon,
+        rarity: r.rarity,
+        x: r.x + n.x * 0.06,
+        y: r.y + n.y * 0.06,
+        z: r.z + n.z * 0.06,
+        nx: n.x,
+        ny: n.y,
+        nz: n.z,
+        t: 0,
+      };
+    this.charges.push(c);
+    this.events.push({ type: 'plant', id: r.owner, charge: c.id, x: c.x, y: c.y, z: c.z, radius: w.radius });
+    return c;
+  }
+  // Every charge of one player goes off at once.
+  detonate(p) {
+    const mine = this.charges.filter((c) => c.owner === p.id);
+    if (!mine.length) return false;
+    this.charges = this.charges.filter((c) => c.owner !== p.id);
+    this.events.push({ type: 'detonate', id: p.id, charges: mine.map((c) => c.id) });
+    for (const c of mine) {
+      const w = weaponStats(c.weapon, c.rarity);
+      this.blast(c.x + c.nx * 0.12, c.y + c.ny * 0.12, c.z + c.nz * 0.12, w.radius, w.damage, p);
+    }
+    return true;
+  }
+  stepCharges(dt) {
+    // Charges of a player who died or left are defused; bots have no detonator, so theirs run on a fuse.
+    this.charges = this.charges.filter((c) => {
+      const owner = this.players.find((p) => p.id === c.owner);
+      if (!owner || owner.hp <= 0) return false;
+      c.t += dt;
+      return true;
+    });
+    for (const p of this.players) if (p.bot && this.charges.some((c) => c.owner === p.id && c.t > 2.2)) this.detonate(p);
+  }
   stepProjectiles(dt) {
     for (let n = this.projectiles.length - 1; n >= 0; n--) {
       const r = this.projectiles[n],
         w = weaponStats(r.weapon, r.rarity);
+      // A grenade that has come to rest just counts down where it lies.
+      if (r.rest !== undefined) {
+        r.rest -= dt;
+        // A clinger stuck to someone rides along with them.
+        if (r.stuck) {
+          const host = this.players.find((q) => q.id === r.stuck.id && q.hp > 0);
+          if (host) Object.assign(r, { x: host.x + r.stuck.dx, y: host.y + r.stuck.dy, z: host.z + r.stuck.dz });
+        }
+        if (r.rest > 0) continue;
+        this.detonateGrenade(r, w, this.players.find((p) => p.id === r.owner));
+        this.projectiles.splice(n, 1);
+        continue;
+      }
+      if (w.fuse) {
+        r.flight = (r.flight || 0) + dt;
+        // A grenade cooked too long goes off in the air (a clinger only arms when it sticks).
+        if (r.flight >= (w.projectile === 'sticky' ? w.fuse + 3 : w.fuse)) {
+          this.detonateGrenade(r, w, this.players.find((p) => p.id === r.owner));
+          this.projectiles.splice(n, 1);
+          continue;
+        }
+      }
       if (w.gravity) r.vy -= w.gravity * dt;
       const speed = Math.hypot(r.vx, r.vy, r.vz) || 1,
         dir = { x: r.vx / speed, y: r.vy / speed, z: r.vz / speed },
@@ -1655,8 +2035,36 @@ export class Arena {
       r.life -= dt;
       if (bossHit && !w.radius) this.bosses.damage(bossHit.boss, w.damage, owner);
       if (Math.abs(r.x) > this.map.limit.x || Math.abs(r.z) > this.map.limit.z || r.y < -1) impact = true;
+      // A grenade lands, rolls to a stop and burns down its fuse; the fuse also runs in the air.
+      if (w.fuse) {
+        if (!impact) continue;
+        r.vx = r.vy = r.vz = 0;
+        if (w.projectile === 'sticky') {
+          // Stuck fast: to a player it hit, or to the surface, with its own fuse from now on.
+          r.rest = w.fuse;
+          if (victim) r.stuck = { id: victim.id, dx: r.x - victim.x, dy: Math.max(0.6, Math.min(1.6, r.y - victim.y)), dz: r.z - victim.z };
+          else {
+            r.x -= dir.x * 0.04;
+            r.y -= dir.y * 0.04;
+            r.z -= dir.z * 0.04;
+          }
+          this.events.push({ type: 'stick', x: r.x, y: r.y, z: r.z, weapon: r.weapon, on: victim?.id || null, id: r.owner });
+          continue;
+        }
+        r.rest = Math.max(0.05, w.fuse - r.flight);
+        // Step back out of the surface it hit so the blast is not inside a wall.
+        r.x -= dir.x * 0.12;
+        r.y -= dir.y * 0.12 - 0.05;
+        r.z -= dir.z * 0.12;
+        this.events.push({ type: 'land', x: r.x, y: r.y, z: r.z, weapon: r.weapon });
+        continue;
+      }
       if (!impact && r.life > 0) continue;
-      if (w.radius) this.explode(r, w, owner);
+      // A demolition charge sticks to the surface it lands on and waits for the detonator. One that hits a boss, a
+      // player or flies off the map goes off at once (it used to hang in mid-air where the boss had been).
+      const surface = !victim && !bossHit && !!cast.impact && distance === cast.distance;
+      if (w.sticky && r.life > 0 && surface) this.placeCharge(r, cast.impact, w);
+      else if (w.radius) this.explode(r, w, owner);
       else {
         // Bolts and daggers only hurt on a direct hit, and leave an impact mark otherwise.
         if (victim && impact && !(owner && owner !== victim && owner.team === victim.team) && victim.shield <= 0)
@@ -1678,6 +2086,154 @@ export class Arena {
       this.projectiles.splice(n, 1);
     }
   }
+  // ---- Items (0.27) ---------------------------------------------------------------------------------
+  // Timed effects: RUSH speed, STIM stamina, the regeneration serum (health first, then armour).
+  stepBuffs(p, dt) {
+    if (p.rush > 0) p.rush = Math.max(0, p.rush - dt);
+    if (p.stim > 0) p.stim = Math.max(0, p.stim - dt);
+    const r = p.regen;
+    if (!r) return;
+    let k = Math.min(r.left, r.rate * dt);
+    r.left -= k;
+    const toHp = Math.min(k, 100 - p.hp);
+    p.hp += toHp;
+    k -= toHp;
+    p.armor = Math.min(100, p.armor + k);
+    if (r.left <= 0 || (p.hp >= 100 && p.armor >= 100)) p.regen = null;
+  }
+  // Why an item cannot be used right now (null when it can): nothing to restore, or not standing on something.
+  useBlocked(p, w) {
+    const e = w.effect || {};
+    if (w.deploy) return p.grounded ? null : 'ON THE GROUND ONLY';
+    const hpFull = !e.hp || p.hp >= (e.hpCap ?? 100),
+      armorFull = !e.armor || p.armor >= (e.armorCap ?? 100);
+    if (e.regen) return p.hp >= 100 && p.armor >= 100 ? 'ALREADY FULL' : null;
+    if (e.armor && e.hp) return hpFull && armorFull ? 'ALREADY FULL' : null;
+    if (e.armor) return armorFull ? (p.armor >= 100 ? 'ARMOUR FULL' : `ARMOUR ALREADY ${e.armorCap}+`) : null;
+    if (e.hp && !e.stim) return hpFull ? (p.hp >= 100 ? 'HEALTH FULL' : `HEALTH ALREADY ${e.hpCap}+`) : null;
+    return null;
+  }
+  finishUse(p, item) {
+    const w = WEAPONS[item.w],
+      e = w.effect || {};
+    p.using = null;
+    p.cooldown = 0.25;
+    if (w.deploy) {
+      const d = this.deploy(p, w);
+      if (!d) {
+        this.events.push({ type: 'use-blocked', id: p.id, why: 'NO ROOM HERE' });
+        return false;
+      }
+    }
+    if (e.hp) p.hp = Math.max(p.hp, Math.min(e.hpCap ?? 100, p.hp + e.hp));
+    if (e.armor) p.armor = Math.max(p.armor, Math.min(e.armorCap ?? 100, p.armor + e.armor));
+    if (e.regen) p.regen = { left: e.regen, rate: e.regen / (e.over || 10) };
+    if (e.speed) p.rush = e.time || 10;
+    if (e.stim) {
+      p.stim = e.stim;
+      p.stamina = 100;
+      p.sprintLocked = false;
+    }
+    item.ammo--;
+    this.events.push({ type: 'use', id: p.id, item: item.w, x: p.x, y: p.y, z: p.z });
+    if (item.ammo <= 0) {
+      p.slots[p.slot] = null;
+      // On to the next thing in the belt, bare hands last.
+      const next = [1, 2, 3, 4].map((k) => ((p.slot - 1 + k) % 4) + 1).find((k) => p.slots[k]);
+      p.slot = next ?? 0;
+      this.syncHeld(p);
+    }
+    return true;
+  }
+  // Sets a deployable down in front of a player. Returns it, or null when there is no room.
+  deploy(p, w) {
+    const f = { x: Math.sin(p.angle), z: Math.cos(p.angle) },
+      reach = w.deploy === 'wall' ? 1.8 : w.deploy === 'pad' ? 1.6 : 1.3,
+      eye = { x: p.x, y: p.y + 0.5, z: p.z },
+      cast = castMap(eye, { x: f.x, y: 0, z: f.z }, reach + 0.6, this.map, null, true),
+      dist = Math.min(reach, cast.distance - 0.6);
+    if (dist < 0.4 && w.deploy === 'wall') return null;
+    const at = dist < 0.4 ? { x: p.x, z: p.z } : { x: p.x + f.x * dist, z: p.z + f.z * dist },
+      d = { id: ++this.deployId, kind: w.deploy, owner: p.id, team: p.team, x: at.x, y: p.y, z: at.z, angle: p.angle, t: 0, life: w.deploy === 'fire' ? 25 : w.deploy === 'pad' ? 120 : 150 };
+    if (w.deploy === 'wall') {
+      // Walls stand square to the street grid, across the way you face.
+      const alongX = Math.abs(f.z) >= Math.abs(f.x),
+        o = { x: at.x, y: p.y + 1.1, z: at.z, w: alongX ? 3 : 0.3, h: 2.2, d: alongX ? 0.3 : 3, hp: w.hp, part: 'deploy', deploy: d.id, color: 0x8a949c };
+      // Never around a player (they would be stuck inside it).
+      if (this.players.some((q) => q.hp > 0 && !q.inBus && Math.abs(q.x - o.x) < o.w / 2 + 0.45 && Math.abs(q.z - o.z) < o.d / 2 + 0.45 && q.y < o.y + 1.1 && q.y + 1.8 > o.y - 1.1))
+        return null;
+      d.alongX = alongX;
+      d.hp = d.max = w.hp;
+      this.addObs(o);
+      (this.deployObs ??= new Map()).set(d.id, o);
+    }
+    // Only the newest few of each kind stay.
+    const cap = { pad: 2, wall: 4, fire: 2 }[w.deploy] || 2,
+      mine = this.deployables.filter((q) => q.owner === p.id && q.kind === d.kind);
+    for (let k = 0; k <= mine.length - cap; k++) this.undeploy(mine[k]);
+    this.deployables.push(d);
+    this.events.push({ type: 'deploy', id: p.id, kind: d.kind, deploy: d.id, x: d.x, y: d.y, z: d.z });
+    return d;
+  }
+  undeploy(d, broken = false) {
+    const i = this.deployables.indexOf(d);
+    if (i < 0) return;
+    this.deployables.splice(i, 1);
+    const o = this.deployObs?.get(d.id);
+    if (o) {
+      this.deployObs.delete(d.id);
+      if (this.colliders.has(o)) this.removeObs(o);
+    }
+    this.events.push({ type: 'undeploy', deploy: d.id, kind: d.kind, broken, x: d.x, y: d.y, z: d.z });
+  }
+  stepDeployables(dt) {
+    for (const d of [...this.deployables]) {
+      d.t += dt;
+      if (d.t >= d.life) {
+        this.undeploy(d);
+        continue;
+      }
+      if (d.kind === 'wall') {
+        const o = this.deployObs?.get(d.id);
+        d.hp = o ? Math.max(0, Math.round(o.hp)) : 0;
+      } else if (d.kind === 'fire') {
+        // Warms anyone beside it: 2 health a second.
+        for (const p of this.players)
+          if (p.hp > 0 && p.hp < 100 && !p.inBus && Math.hypot(p.x - d.x, p.z - d.z) < 3.4 && Math.abs(p.y - d.y) < 2) p.hp = Math.min(100, p.hp + 2 * dt);
+      } else if (d.kind === 'pad')
+        for (const p of this.players) {
+          p.padCd = Math.max(0, (p.padCd || 0) - dt / Math.max(1, this.deployables.length));
+          if (p.hp <= 0 || p.inBus || p.padCd > 0 || p.vy > 1 || Math.hypot(p.x - d.x, p.z - d.z) > 1.05 || Math.abs(p.y - d.y) > 0.7) continue;
+          // Straight up, a little forward, then the glider opens on the way down.
+          p.vy = 23;
+          p.grounded = false;
+          p.dropping = p.launched = true;
+          p.padCd = 1.2;
+          p.push = { x: Math.sin(p.angle) * 4, z: Math.cos(p.angle) * 4 };
+          this.events.push({ type: 'pad', id: p.id, deploy: d.id, x: d.x, y: d.y, z: d.z });
+        }
+    }
+  }
+  // IMPULSE: everyone near it (the thrower too) is thrown up and away. Walls in between shelter.
+  impulse(x, y, z, w, owner) {
+    this.events.push({ type: 'impulse', x, y, z, radius: w.radius, id: owner?.id });
+    for (const p of this.players) {
+      if (p.hp <= 0 || p.inBus) continue;
+      const dx = p.x - x,
+        dz = p.z - z,
+        d = Math.hypot(dx, p.y + 0.9 - y, dz);
+      if (d > w.radius || !lineClear({ x, z }, p, 0, this.map.obstacles)) continue;
+      const flat = Math.hypot(dx, dz) || 1,
+        k = 1 - (d / w.radius) * 0.5,
+        push = (w.knock || 20) * k;
+      p.push = { x: (dx / flat) * push, z: (dz / flat) * push };
+      p.vy = 8 + 5 * k;
+      p.grounded = false;
+      p.launched = true;
+      p.healing = 0;
+      if (p.bot) p.brain.pathTimer = 0;
+    }
+  }
   snapshot() {
     return {
       cheated: this.cheated,
@@ -1691,16 +2247,20 @@ export class Arena {
         props: [...this.destruction.props],
         roofs: [...this.destruction.roofs],
       },
-      zone: this.mode === 'royale' ? { ...this.zone } : null,
+      zone: this.mode === 'royale' || this.zone.fixed ? { ...this.zone } : null,
       chests: this.chests.map((c) => ({ ...c, loot: c.loot ? { ...c.loot } : null })),
       projectiles: this.projectiles.map((r) => ({ ...r })),
+      charges: this.charges.map((c) => ({ ...c })),
+      smokes: this.smokes.map((s) => ({ ...s })),
+      deployables: this.deployables.map((d) => ({ ...d })),
       seed: this.map.seed,
       size: this.size,
       scoreLimit: this.scoreLimit,
       mode: this.mode,
       ...this.bosses.snapshot(),
       bus: this.bus ? { ...this.bus } : null,
-      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, perks, skills, ...p }) => ({
+      // Input bookkeeping (held keys, the bots' brains) stays on the server: only what clients draw goes out.
+      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, perks, skills, dashHeld, detonateHeld, interactHeld, healHeld, emoteHeld, abilityHeld, relicSwapHeld, fireHeld, useArmed, padCd, ack, inputSeq, interp, ...p }) => ({
         ...p,
         // Only what the client draws: whether DASH is unlocked and how long it has left.
         dashCd: perks?.dash ? Math.round(p.dashCd * 10) / 10 : undefined,

@@ -1,12 +1,13 @@
 import { COSMETICS, appearance } from './cosmetics.js';
 import { CombatEffects } from './effects.js';
-import { groundChunks, makeSky, makeWater, detailMaterial, makeEnvironment, setSurfaceQuality, WORLD } from './materials.js';
+import { groundChunks, makeSky, makeWater, detailMaterial, makeEnvironment, setSurfaceQuality, copySurface, WORLD } from './materials.js';
 import { Scenery } from './scenery.js';
 import { chimneyOf } from './roofs.js';
 import { Nature } from './nature.js';
 import { GrassField } from './grass.js';
-import { ChestField } from './chests.js';
-import { BossViews } from './boss-view.js';
+import { ChestField, TIER_COLORS } from './chests.js';
+import { DeployViews } from './deploy-view.js';
+import { BossViews, BUS_SEATS } from './boss-view.js';
 import { syncDestruction } from './destruction.js';
 import { groundHeight } from './terrain.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -15,13 +16,61 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { GradePass, WeaponPass, sanitizeGrade, isNeutral } from './grading.js';
 import { direction, EYE_HEIGHT } from './combat.js';
+import { castMap } from './raycast.js';
 import * as T from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createWorld, DEFAULT_SEED, WEAPONS, mapSize } from './world.js';
-import { RARITIES, GEAR } from './catalog.js';
-import { model, character, gun, gearModel, chestModel, CHARACTER_GUNS, ALL_CHARACTER_GUNS } from './assets.js';
-// Length (m) of mounted third-person models relative to the rig's rifle.
-const MOUNT_SCALE = { katana: 1.25, crossbow: 0.85, minigun: 1.05 };
+import { RARITIES, GEAR, ARMOR_TIERS } from './catalog.js';
+import { model, gun, gearModel, chestModel, character, characterGun, ALL_CHARACTER_GUNS } from './assets.js';
+import { operatorStyle, stanceOf, KITS } from './soldier.js';
+import { dressViewWeapon, makeViewProps, poseViewWeapon } from './viewmodel.js';
+import { rigBone, restorePose, savePose } from './rig-pose.js';
+import { convergedAim } from './aim.js';
+import { makeStage, frameLobby } from './lobby-stage.js';
+// The toon soldiers' clips for the game's animation names (their rig has 17: Death, Duck, HitReact, Idle,
+// Idle_Shoot, Jump, Jump_Idle, Jump_Land, No, Punch, Run, Run_Gun, Run_Shoot, Walk, Walk_Shoot, Wave, Yes).
+const TOON_CLIPS = {
+  Sprint: 'Run',
+  Jump_Start: 'Jump',
+  HitHead: 'HitReact',
+  Slash: 'Punch',
+  Throw: 'Punch',
+  Jab: 'Punch',
+  Heal: 'Duck',
+  Drink: 'Idle',
+  Use: 'Duck',
+  Loot: 'Duck',
+  Sit: 'Duck',
+  Dance: 'Wave',
+  Robot: 'Walk',
+  FoldArms: 'Idle',
+};
+// Bones the game turns after the clip (aim bend, torso twist, arm poses): restored before every mixer update.
+// Bare-hands guard on the toon rig (radians, body frame): arms in and forward, forearms up.
+const GUARD = { inL: -0.5, up: -0.7, fore: -1.3, twist: 0 };
+const TOON_POSED = ['Abdomen', 'Torso', 'Neck', 'UpperArm.L', 'UpperArm.R', 'LowerArm.L', 'LowerArm.R'];
+// Length of mounted third-person models relative to the rig's rifle.
+const MOUNT_SCALE = { katana: 1.25, crossbow: 0.85, minigun: 1.05, c4: 0.4, frag: 0.16, flashbang: 0.17, smokegrenade: 0.18, impulse: 0.16, sticky: 0.16, shield: 1 };
+// Uniform colours for bot tints (clothing materials only: skin, gear and guns keep theirs).
+const UNIFORM_MATERIALS = ['Character_Main', 'Pants', 'Hazmat_Main', 'Enemy_Red'];
+const UNIFORM_TINTS = [0xb8a276, 0x7b8790, 0x3d5a8a, 0x6f8246, 0xa0413b, 0xe6e8e2, 0x3a3a3e, 0x7d5aa0];
+// Recolours a soldier's uniform: a skin's own colour, or a bot's tint.
+export function applyUniformTint(body, tint, skin = null) {
+  const hex = skin ? new T.Color(skin) : Number.isInteger(tint) ? new T.Color(UNIFORM_TINTS[tint % UNIFORM_TINTS.length]) : null;
+  if (!hex) return;
+  body.traverse((o) => {
+    if (!o.isMesh || ALL_CHARACTER_GUNS.includes(o.name) || ALL_CHARACTER_GUNS.includes(o.parent?.name)) return;
+    const list = Array.isArray(o.material) ? o.material : [o.material];
+    const next = list.map((m) => {
+      if (!UNIFORM_MATERIALS.includes(m.name)) return m;
+      const c = m.clone();
+      c.color.copy(hex).multiplyScalar(skin ? 0.8 : 0.55);
+      c.userData.ownedTint = true;
+      return c;
+    });
+    o.material = Array.isArray(o.material) ? next : next[0];
+  });
+}
 function localSize(object) {
   const c = object.clone(true);
   c.position.set(0, 0, 0);
@@ -31,19 +80,34 @@ function localSize(object) {
   const box = new T.Box3().setFromObject(c);
   return { size: box.getSize(new T.Vector3()), center: box.getCenter(new T.Vector3()) };
 }
+const WHITE = new T.Color(1, 1, 1);
 function tintObject(root, color) {
+  const plain = color.equals(WHITE);
   root.traverse((o) => {
-    if (!o.isMesh) return;
+    // Charms keep their own colour (and own their material, see markOwned).
+    if (!o.isMesh || o.userData.owned) return;
     if (!o.userData.tintMaterials) {
       const original = Array.isArray(o.material) ? o.material : [o.material];
       o.userData.tintMaterials = original.map((m) => {
-        const c = m.clone();
+        const c = copySurface(m, m.clone());
         c.userData.baseColor = m.color?.clone();
+        c.userData.baseRough = m.roughness;
+        c.userData.baseMetal = m.metalness;
         return c;
       });
       o.material = Array.isArray(o.material) ? o.userData.tintMaterials : o.userData.tintMaterials[0];
     }
-    for (const m of o.userData.tintMaterials) if (m.color) m.color.copy(m.userData.baseColor).multiply(color);
+    for (const m of o.userData.tintMaterials) {
+      if (!m.color) continue;
+      m.roughness = m.userData.baseRough ?? m.roughness;
+      m.metalness = m.userData.baseMetal ?? m.metalness;
+      // A weapon colour is a coating on the steel and polymer (wood, rubber and bright steel keep their own).
+      if (m.userData.finishable && !plain) {
+        m.color.copy(color).multiplyScalar(0.62);
+        m.metalness = Math.min(m.metalness, 0.35);
+        m.roughness = Math.max(m.roughness, 0.42);
+      } else m.color.copy(m.userData.baseColor).multiply(color);
+    }
   });
 }
 // Weapon patterns: they repaint the cloned tint materials, so a pattern always sits on top of the colour.
@@ -144,66 +208,21 @@ function disposeTint(root) {
     for (const m of o.userData.tintMaterials || []) m.dispose();
   });
 }
-const palette = { grass: 0x90a485, road: 0x7d8a87 };
-// Uniform colours for randomised bot skins (applied to clothing materials only).
-const UNIFORM_MATERIALS = ['Character_Main', 'Pants', 'Hazmat_Main', 'Enemy_Red'];
-const UNIFORM_TINTS = [0xb8a276, 0x7b8790, 0x3d5a8a, 0x6f8246, 0xa0413b, 0xe6e8e2, 0x3a3a3e, 0x7d5aa0];
-// Recolours only the uniform materials of a character (skin, gear and weapons keep their colours).
-export function applyUniformTint(body, tint) {
-  if (!Number.isInteger(tint)) return;
-  const color = new T.Color(UNIFORM_TINTS[tint % UNIFORM_TINTS.length]);
-  body.traverse((o) => {
-    if (!o.isMesh) return;
-    const list = Array.isArray(o.material) ? o.material : [o.material];
-    const next = list.map((m) => {
-      if (!UNIFORM_MATERIALS.includes(m.name)) return m;
-      const c = m.clone();
-      c.color.copy(color).multiplyScalar(0.55);
-      c.userData.ownedTint = true;
-      return c;
-    });
-    o.material = Array.isArray(o.material) ? next : next[0];
+// Parts built for one character (vests, charms, accessories) own their geometry and materials: mark them so
+// removing the character frees them (they used to pile up on the GPU with every respawned bot and new match).
+function markOwned(root) {
+  root?.traverse((o) => o.isMesh && (o.userData.owned = true));
+  return root;
+}
+function disposeOwned(root) {
+  root.traverse((o) => {
+    if (!o.userData.owned) return;
+    o.geometry?.dispose();
+    for (const m of [o.material].flat()) m?.dispose();
   });
 }
-// First-person reload motions per weapon family.
-const RELOAD_STYLE = {
-  shotgun: 'shells',
-  revolver: 'cylinder',
-  handcannon: 'cylinder',
-  rocket: 'tube',
-  grenadelauncher: 'shells',
-  crossbow: 'tube',
-  dagger: 'draw',
-};
-function reloadPose(style, t) {
-  const p = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
-  if (t < 0 || style === 'none') return p;
-  const inOut = Math.sin(Math.PI * t); // 0 → 1 → 0
-  if (style === 'mag') {
-    p.y = -inOut * 0.1;
-    p.rx = inOut * 0.25;
-    p.rz = -inOut * 0.55;
-  } else if (style === 'shells') {
-    // Tilt, then a pump for each shell pushed in.
-    p.rz = inOut * 0.4;
-    p.rx = inOut * 0.15;
-    p.z = Math.max(0, Math.sin(t * Math.PI * 8)) * 0.035 * inOut;
-    p.y = -inOut * 0.06;
-  } else if (style === 'cylinder') {
-    p.rz = -inOut * 1.05;
-    p.x = -inOut * 0.08;
-    p.y = -inOut * 0.04;
-    p.ry = inOut * 0.2;
-  } else if (style === 'tube') {
-    p.rx = -inOut * 0.7;
-    p.y = -inOut * 0.2;
-  } else if (style === 'draw') {
-    // A new dagger comes up from the belt.
-    p.y = -inOut * 0.45;
-    p.rx = inOut * 0.6;
-  }
-  return p;
-}
+const palette = { grass: 0x90a485, road: 0x7d8a87 };
+const UP = new T.Vector3(0, 1, 0);
 // Destruction only grows during a match (damaged-cell masks can vanish when their wall falls, so they don't count).
 const destructionCount = (d) =>
   (d.panels?.length || 0) +
@@ -213,9 +232,36 @@ const destructionCount = (d) =>
   (d.props?.length || 0) +
   (d.roofs?.length || 0) +
   Object.keys(d.storeys || {}).length;
+// Asks for a WebGL 2 context, stepping down what it asks for (multisampling, the fast GPU of a laptop with two)
+// when the browser refuses. If every request fails the error carries the browser's own reason and is marked
+// `webgl`, so the loading screen can explain what to do instead of showing a stack trace.
+const CONTEXT_REQUESTS = [
+  { antialias: true, powerPreference: 'high-performance' },
+  { antialias: false, powerPreference: 'default' },
+  { antialias: false, powerPreference: 'low-power', stencil: false },
+];
+export function makeRenderer(canvas) {
+  let reason = '',
+    last = null;
+  const why = (e) => (reason = e.statusMessage || reason);
+  canvas.addEventListener('webglcontextcreationerror', why);
+  try {
+    for (const request of CONTEXT_REQUESTS)
+      try {
+        return new T.WebGLRenderer({ canvas, ...request });
+      } catch (e) {
+        last = e;
+      }
+  } finally {
+    canvas.removeEventListener('webglcontextcreationerror', why);
+  }
+  const error = new Error((last?.message || 'Error creating WebGL context.') + (reason ? ' Browser: ' + reason : ''));
+  error.webgl = true;
+  throw error;
+}
 export class View {
   constructor(canvas) {
-    this.renderer = new T.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    this.renderer = makeRenderer(canvas);
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = T.PCFSoftShadowMap;
@@ -241,6 +287,7 @@ export class View {
     this.waters = [];
     this.chestViews = new Map();
     this.rocketViews = new Map();
+    this.chargeViews = new Map(); // planted C4, by charge id
     this.hemi = new T.HemisphereLight(0xc5e5ef, 0x85835d, 0.55);
     this.scene.add(this.hemi);
     this.sun = new T.DirectionalLight(0xffe4be, 3.2);
@@ -345,6 +392,14 @@ export class View {
     }
     for (const v of this.chestViews.values()) this.disposeLoot(v);
     this.chestViews.clear();
+    for (const m of this.chargeViews.values()) m.removeFromParent();
+    this.chargeViews.clear();
+    for (const v of this.smokeViews?.values() || []) {
+      v.group.removeFromParent();
+      v.geometry.dispose();
+      v.material.dispose();
+    }
+    this.smokeViews?.clear();
     this.map = createWorld(seed, size);
     this.fx?.reset(this.map);
     this.waters = [];
@@ -452,29 +507,35 @@ export class View {
       for (const g of b.geometries) g.dispose();
     }
   }
+  // A player or bot: one of the three toon soldiers (0.27.1, as up to 0.21), in the uniform colour of its skin or
+  // bot tint, with every weapon and item in its right hand (only the one held is shown), gear, vests, the
+  // accessory on its head, and the name and health bar above it.
   person(p, local) {
     const root = new T.Group();
     this.scene.add(root);
     const look = appearance(p.cosmetics),
-      index = COSMETICS.find((c) => c.id === look.operator).model,
-      a = character(index),
+      spec = COSMETICS.find((c) => c.id === look.operator),
+      a = character(spec?.model || 0),
       body = a.model;
+    // Yaw first, then pitch about the character's own shoulders: leans and dives tip the body the way it faces.
+    body.rotation.order = 'YXZ';
     root.add(body);
-    applyUniformTint(body, p.cosmetics?.tint);
-    const mount = body.getObjectByName('AK'),
+    applyUniformTint(body, look.tint, spec?.skin);
+    // The rig's short cannon is replaced by the machine gun model.
+    const ak = body.getObjectByName('AK'),
       old = body.getObjectByName('ShortCannon');
-    if (mount && old) {
+    if (ak && old) {
       const heavy = new T.Group();
       heavy.name = 'ShortCannon';
-      heavy.position.copy(mount.position);
-      heavy.quaternion.copy(mount.quaternion);
-      heavy.scale.copy(mount.scale);
+      heavy.position.copy(ak.position);
+      heavy.quaternion.copy(ak.quaternion);
+      heavy.scale.copy(ak.scale);
       const mesh = model('lmg');
       mesh.rotation.y = -Math.PI / 2;
       mesh.scale.setScalar(1.3);
       mesh.position.set(-0.25, 0.05, 0);
       heavy.add(mesh);
-      mount.parent.add(heavy);
+      ak.parent.add(heavy);
       old.removeFromParent();
     }
     const guns = [];
@@ -484,46 +545,57 @@ export class View {
         o.visible = false;
       }
     });
-    // Weapons that are not part of the rig are mounted where the rifle sits, scaled to a matching size.
-    const ak = body.getObjectByName('AK');
+    // Weapons and items that are not part of the rig are mounted where the rifle sits the first time they are
+    // held (mountGun): weapons scaled against the rifle, items at their real size.
+    let mountAt = null;
     if (ak) {
-      const ref = localSize(ak);
-      for (const w of WEAPONS)
-        if (w.char.startsWith('mount:')) {
-          const mount = new T.Group(),
-            mesh = model(w.model),
-            own = localSize(mesh),
-            s = (ref.size.x * (MOUNT_SCALE[w.model] || 1)) / Math.max(own.size.x, 0.001);
-          mount.name = 'Mount_' + w.model;
-          mount.position.copy(ak.position);
-          mount.quaternion.copy(ak.quaternion);
-          mount.scale.copy(ak.scale);
-          mesh.scale.setScalar(s);
-          mesh.position.set(ref.center.x - own.center.x * s, ref.center.y - own.center.y * s, -own.center.z * s);
-          if (w.melee) mesh.position.x = ref.center.x - (own.center.x + own.size.x * 0.38) * s;
-          mount.add(mesh);
-          mount.visible = false;
-          ak.parent.add(mount);
-          guns.push(mount);
-        }
+      body.updateMatrixWorld(true);
+      mountAt = { ak, ref: localSize(ak), real: 1 / ak.getWorldScale(new T.Vector3()).x };
     }
     // Back-worn gear. Children of the scaled body, so dimensions are divided by its scale.
-    const gear = {};
+    const gear = {},
+      k = 1 / body.scale.x;
     for (const g of GEAR) {
       const m = gearModel(g.id);
       m.visible = false;
-      m.scale.setScalar(1 / body.scale.x);
+      m.scale.setScalar(k);
       if (g.id === 'jetpack') {
-        m.position.set(0, 1.28 / body.scale.x, -0.2 / body.scale.x);
+        m.position.set(0, 1.28 * k, -0.2 * k);
         m.rotation.y = -Math.PI / 2;
+      } else if (g.id === 'shield') {
+        // Carried in front of the left side of the body.
+        m.scale.setScalar(1.15 * k);
+        m.position.set(-0.34 * k, 1.05 * k, 0.34 * k);
+        m.rotation.set(0, Math.PI, 0);
       } else {
-        m.position.set(0, 2.25 / body.scale.x, 0.05 / body.scale.x);
+        m.position.set(0, 2.25 * k, 0.05 * k);
         m.rotation.y = Math.PI;
       }
       body.add(m);
       gear[g.id] = m;
     }
-    // The imported pack includes gun attachments and the matching animated poses.
+    // Body armour: a plate carrier over the chest, and a front plate on the heavy one.
+    const vests = {};
+    for (const tier of ARMOR_TIERS) {
+      const vest = new T.Group(),
+        mat = new T.MeshStandardMaterial({ color: tier.color, roughness: 0.75, metalness: 0.15, flatShading: true });
+      const front = new T.Mesh(new T.BoxGeometry(0.52, 0.56, 0.3), mat);
+      front.castShadow = true;
+      vest.add(front);
+      const belt = new T.Mesh(new T.BoxGeometry(0.56, 0.12, 0.34), mat);
+      belt.position.y = -0.3;
+      vest.add(belt);
+      if (tier.id === 'heavy') {
+        const plate = new T.Mesh(new T.BoxGeometry(0.34, 0.3, 0.06), mat);
+        plate.position.set(0, 0.08, 0.17);
+        vest.add(plate);
+      }
+      vest.scale.setScalar(k);
+      vest.position.set(0, 1.38 * k, 0);
+      vest.visible = false;
+      body.add(markOwned(vest));
+      vests[tier.id] = vest;
+    }
     const actions = Object.fromEntries(a.clips.map((c) => [c.name, a.mixer.clipAction(c)]));
     const hp = new T.Group();
     hp.position.y = 2.12;
@@ -534,29 +606,26 @@ export class View {
       label = this.text(local ? 'YOU' : p.name, 0.8, 0.16, ally ? '#b6f5d6' : '#f7e5be', ally ? '#2f6b55' : '#29464a');
     label.position.y = 2.37;
     root.add(label);
-    // Accessory on the head bone, charm under the grip of every weapon.
+    // Accessory on the head bone, charm under the grip of every weapon (not on items).
     const head = body.getObjectByName('Head'),
       accessory = accessoryMesh(look.accessory);
     if (head && accessory) {
-      accessory.scale.setScalar(1 / body.scale.x);
-      accessory.position.y = 0.06 / body.scale.x;
-      head.add(accessory);
-    }
-    for (const g of guns) {
-      const box = localSize(g),
-        charm = charmMesh(look.charm, Math.max(0.02, box.size.y * 0.35));
-      if (charm) {
-        charm.position.set(box.center.x, box.center.y - box.size.y * 0.55, box.center.z);
-        g.add(charm);
-      }
-    }
+      accessory.scale.setScalar(k);
+      accessory.position.y = 0.06 * k;
+      head.add(markOwned(accessory));
+    } else if (accessory) disposeOwned(markOwned(accessory));
+    for (const g of guns) this.gunCharm(g, look.charm);
     const v = {
       root,
       body,
+      posedNames: TOON_POSED,
       mixer: a.mixer,
       actions,
       guns,
+      mountAt,
+      look,
       gear,
+      vests,
       hp,
       bar,
       label,
@@ -582,6 +651,47 @@ export class View {
     this.people.set(p.id, v);
     return v;
   }
+  // A charm under the grip of a gun in a soldier's hand (items carry none).
+  gunCharm(g, charmId) {
+    const box = localSize(g),
+      charm = charmMesh(charmId, Math.max(0.02, box.size.y * 0.35));
+    if (charm) {
+      charm.position.set(box.center.x, box.center.y - box.size.y * 0.55, box.center.z);
+      g.add(markOwned(charm));
+    }
+  }
+  // Mounts a weapon or item that the rig does not carry in a soldier's right hand (the first time it is held).
+  mountGun(v, w) {
+    const at = v.mountAt,
+      name = characterGun(w);
+    if (!at || !name) return null;
+    const { ak, ref, real } = at,
+      mount = new T.Group(),
+      mesh = model(w.model),
+      own = localSize(mesh),
+      s = w.consumable ? real * (w.deploy ? 0.8 : 1) : (ref.size.x * (MOUNT_SCALE[w.model] || 1)) / Math.max(own.size.x, 0.001);
+    mount.name = name;
+    mount.position.copy(ak.position);
+    mount.quaternion.copy(ak.quaternion);
+    mount.scale.copy(ak.scale);
+    mesh.scale.setScalar(s);
+    if (w.consumable) mesh.position.set(ref.center.x * 0.35 - own.center.x * s, ref.center.y - own.center.y * s, -own.center.z * s);
+    else mesh.position.set(ref.center.x - own.center.x * s, ref.center.y - own.center.y * s, -own.center.z * s);
+    if (w.melee) mesh.position.x = ref.center.x - (own.center.x + own.size.x * 0.38) * s;
+    mount.add(mesh);
+    mount.visible = false;
+    ak.parent.add(mount);
+    v.guns.push(mount);
+    if (!w.consumable) {
+      if (v.finish && (v.finish !== 'standard' || v.pattern !== 'nopattern')) {
+        const color = new T.Color(COSMETICS.find((c) => c.id === v.finish).color);
+        tintObject(mount, color);
+        applyPattern(mount, v.pattern, color);
+      }
+      this.gunCharm(mount, v.charm);
+    }
+    return mount;
+  }
   // Cosmetic effects that follow a player: a dust trail, sparks, a jade aura, embers.
   cosmeticEffect(v, p, id, dt) {
     const spec = COSMETICS.find((c) => c.id === id);
@@ -604,22 +714,38 @@ export class View {
       this.fx.emit({ x: p.x + Math.cos(a) * 0.5, y: base.y, z: p.z + Math.sin(a) * 0.5 }, { x: 0, y: 0.7, z: 0 }, color, 0.1, 0.7, { drag: 1.3 });
     }
   }
+  // Cross-fades into a new clip. Gaits blend longer and keep their step phase (walk → jog → sprint does not restart
+  // the stride); strikes and throws cut in fast; one-shot clips play once and hold their last frame.
   animate(v, name) {
     if (v.animation === name) return;
     const action = v.actions[name] || v.actions.Idle;
     if (!action) return;
-    v.actions[v.animation]?.fadeOut(0.15);
-    action.reset().fadeIn(0.15);
-    action.setLoop(name === 'Death' ? T.LoopOnce : T.LoopRepeat, Infinity);
-    action.clampWhenFinished = name === 'Death';
+    const from = v.actions[v.animation],
+      gait = (n) => /^(Walk|Run|Idle)/.test(n || ''),
+      fast = ['Punch', 'HitReact', 'Jump', 'Idle_Shoot', 'Walk_Shoot', 'Run_Shoot'].includes(name),
+      fade = fast ? 0.08 : name === 'Death' ? 0.2 : gait(name) && gait(v.animation) ? 0.25 : 0.18,
+      once = ['Death', 'Jump', 'Jump_Land', 'Punch', 'HitReact'].includes(name);
+    action.reset();
+    if (from && gait(name) && gait(v.animation) && !/^Idle/.test(name) && !/^Idle/.test(v.animation)) {
+      const a = from.getClip().duration || 1,
+        b = action.getClip().duration || 1;
+      action.time = ((from.time % a) / a) * b;
+    }
+    from?.fadeOut(fade);
+    action.fadeIn(fade);
+    action.setLoop(once ? T.LoopOnce : T.LoopRepeat, Infinity);
+    action.clampWhenFinished = once;
     action.play();
     v.animation = name;
   }
   makeViewWeapon() {
     this.weaponScene = new T.Scene();
+    // The sky's reflections on the steel; a softer fill than before, since the environment lights it too.
+    this.weaponScene.environment = this.envTarget.texture;
+    this.weaponScene.environmentIntensity = 0.9;
     this.weaponCamera = new T.PerspectiveCamera(65, 1, 0.01, 10);
-    this.weaponScene.add(new T.HemisphereLight(0xfff0dd, 0x426466, 3));
-    const light = new T.DirectionalLight(0xffffff, 2);
+    this.weaponScene.add(new T.HemisphereLight(0xfff0dd, 0x426466, 1.6));
+    const light = new T.DirectionalLight(0xffffff, 2.2);
     light.position.set(-2, 4, 3);
     this.weaponScene.add(light);
     this.fp = new T.Group();
@@ -629,34 +755,23 @@ export class View {
       const g = gun(i),
         w = WEAPONS[i];
       this.fp.add(g);
-      if (g.userData.pivot) {
-        // One gloved fist around the grip and a sleeve behind it.
-        this.box(0.0, -0.01, 0.02, 0.075, 0.085, 0.1, 0xe4bc97, g);
-        this.box(0.02, -0.05, 0.14, 0.1, 0.1, 0.2, 0x506e70, g);
-      } else {
-        this.box(0.04, -0.16, 0.1, 0.105, 0.12, 0.25, 0xe4bc97, g);
-        this.box(0.06, -0.17, 0.27, 0.13, 0.14, 0.22, 0x506e70, g);
-        if (w.category !== 'secondary') this.box(-0.05, -0.12, -0.13, 0.1, 0.1, 0.18, 0xe4bc97, g);
-      }
-      const flash = new T.Mesh(new T.OctahedronGeometry(0.09), new T.MeshBasicMaterial({ color: 0xffce75 }));
-      flash.position.z = -g.userData.length / 2;
-      flash.visible = false;
-      if (!w.melee && !w.silent) g.add(flash);
-      g.userData.flash = flash;
-      if (!w.melee && !RELOAD_STYLE[w.model]) {
-        const mag = this.box(0.0, -0.12, -g.userData.length * 0.1, 0.05, 0.16, 0.08, 0x3b3f45, g);
-        mag.userData.y = -0.12;
-        mag.visible = false;
-        g.userData.mag = mag;
-      }
+      dressViewWeapon(this, g, w);
       this.fpGuns.push(g);
     }
+    // The ballistic shield is carried in the left hand, filling that side of the view.
+    this.fpShield = gearModel('shield');
+    this.fpShield.position.set(-0.34, -0.22, -0.62);
+    this.fpShield.rotation.set(0.06, 0.34, 0.05);
+    this.fpShield.scale.setScalar(0.92);
+    this.fpShield.visible = false;
+    this.weaponScene.add(this.fpShield);
     this.fpGlider = gearModel('glider');
     this.fpGlider.position.set(0, 0.75, -0.25);
     this.fpGlider.rotation.set(0.25, Math.PI, 0);
     this.fpGlider.scale.setScalar(0.75);
     this.fpGlider.visible = false;
     this.weaponScene.add(this.fpGlider);
+    makeViewProps(this);
     this.swing = 0;
     this.swingSide = 1;
     this.fpPhase = 0;
@@ -667,13 +782,31 @@ export class View {
   }
   setCosmetics(value) {
     const look = appearance(value);
+    // First-person sleeves and gloves in the kit of the operator you wear.
+    const opKey = look.operator + ':' + look.tint;
+    if (this.fpOperator !== opKey && this.fpHandMats) {
+      const spec = COSMETICS.find((c) => c.id === look.operator),
+        style = operatorStyle(spec?.model || 0, spec?.skin, look.tint),
+        kit = KITS[style.kit],
+        cloth = style.look.plain ?? style.look.camo?.[0] ?? kit.plain ?? kit.camo[0],
+        dark = style.look.camo?.[2] ?? kit.camo?.[2] ?? kit.kit;
+      this.fpHandMats.sleeve.color.setHex(cloth);
+      this.fpHandMats.cuff.color.setHex(dark);
+      this.fpHandMats.glove.color.setHex(kit.glove);
+      this.fpHandMats.knuckle.color.setHex(kit.kit2);
+      this.fpOperator = opKey;
+    }
     if (this.finish === look.finish && this.pattern === look.pattern && this.charm === look.charm) return;
     const color = new T.Color(COSMETICS.find((c) => c.id === look.finish).color);
     for (const g of this.fpGuns) {
       tintObject(g.children[0], color);
       applyPattern(g.children[0], look.pattern, color);
       if (this.charm !== look.charm) {
-        for (const c of [...g.children]) if (c.userData.charm) g.remove(c);
+        for (const c of [...g.children])
+          if (c.userData.charm) {
+            g.remove(c);
+            disposeOwned(markOwned(c));
+          }
         const box = localSize(g.children[0]),
           charm = charmMesh(look.charm, Math.max(0.02, box.size.y * 0.3));
         if (charm) {
@@ -690,7 +823,8 @@ export class View {
     this.scene.remove(v.root);
     v.mixer.stopAllAction();
     v.mixer.uncacheRoot(v.body);
-    disposeTint(v.body);
+    disposeTint(v.root);
+    disposeOwned(v.root);
     v.body.traverse((o) => {
       if (!o.isMesh) return;
       for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (m.userData.ownedTint) m.dispose();
@@ -700,7 +834,42 @@ export class View {
     v.label.material.dispose();
   }
   event(e) {
+    if (e.type === 'shot') {
+      // Brass and flash: your own flash in first person is drawn on the weapon in your hands; revolvers keep their
+      // cases until the reload; shotguns throw red shells.
+      const model = WEAPONS[e.weapon]?.model;
+      e.ownView = e.id === this.localId && !this.thirdPerson;
+      e.noBrass = model === 'revolver' || model === 'handcannon';
+      e.shell = model === 'shotgun';
+    }
+    // Item effects in the item's colour; a chest bursts in its tier's; an elimination where the body fell.
+    if (e.type === 'use') {
+      const fx = WEAPONS[e.item]?.effect || {};
+      e.color = fx.regen ? 0xc58cff : fx.speed ? 0xffd24a : fx.stim ? 0xff6f61 : fx.armor && fx.hp ? 0x9fe8ff : fx.armor ? 0x5fb4ff : fx.hp ? 0x7dff9a : null;
+      if (e.color === null) return;
+    }
+    if (e.type === 'loot') {
+      const v = this.people.get(e.id);
+      if (v) v.lootT = 0.7;
+    }
+    if (e.type === 'loot' && e.tier && e.tier !== 'drop') this.fx.event({ type: 'chest-open', x: e.x, y: e.y, z: e.z, color: TIER_COLORS[e.tier] ?? 0xffd06a });
+    if (e.type === 'kill') {
+      const v = this.lastState?.players?.find((q) => q.id === e.victim);
+      if (v) this.fx.event({ type: 'eliminated', x: v.x, y: v.y || 0, z: v.z, color: e.victim === this.localId ? 0xff6a5a : 0xfff0c8 });
+    }
     this.fx.event(e);
+    // Boss moves draw their telegraphs, spikes and bursts; a jump out of the bus swings its hatch open.
+    (this.bossViews ||= new BossViews(this)).event(e);
+    if (e.type === 'drop') this.bossViews.busJump();
+    if (e.type === 'drop' && e.id === this.localId) this.dropT = 0;
+    const near = (range, amount) => {
+      const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
+      this.shake = Math.max(this.shake, Math.max(0, 1 - d / range) * amount);
+    };
+    if (e.type === 'boss-slam') near(e.move === 'charge' || e.move === 'smash' ? 30 : 18, e.move === 'charge' || e.move === 'smash' ? 0.6 : 0.3);
+    else if (e.type === 'boss-land' || e.type === 'emerge') near(35, 0.8);
+    else if (e.type === 'implode' || e.type === 'frost-nova' || e.type === 'boss-sweep') near(25, 0.45);
+    else if (e.type === 'spike') near(14, 0.2);
     // Remember where recent blasts, bullets and blades struck: knocked-out wall cells fly away from them.
     this.hitSources ??= [];
     const now = performance.now();
@@ -736,15 +905,9 @@ export class View {
       const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
       this.shake = Math.max(this.shake, Math.max(0, 1 - d / 30) * 0.45);
     }
-    if (e.type === 'quake') {
+    if (e.type === 'impulse') {
       const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
-      this.shake = Math.max(this.shake, Math.max(0, 1 - d / 40) * 0.8);
-    }
-    // A cataclysm rolls over the whole map: everyone feels it.
-    if (e.type === 'cataclysm') this.shake = Math.max(this.shake, 1.4);
-    if (e.type === 'rift') {
-      const d = Math.hypot(e.x - this.camera.position.x, e.z - this.camera.position.z);
-      this.shake = Math.max(this.shake, Math.max(0, 1 - d / 60) * 0.6);
+      this.shake = Math.max(this.shake, Math.max(0, 1 - d / 25) * 0.4);
     }
   }
   // Apply authoritative destruction lists: panels, props and cars that broke, buildings that fell.
@@ -867,7 +1030,14 @@ export class View {
   }
   projectileView(r) {
     let m;
-    if (r.kind === 'dagger') {
+    if (['c4', 'frag', 'flash', 'smoke'].includes(r.kind)) {
+      // Thrown things are drawn as the model in your hand, tumbling.
+      m = new T.Group();
+      const c = model(WEAPONS[r.weapon].model);
+      c.scale.setScalar(r.kind === 'c4' ? 1 : 1.6);
+      m.add(c);
+      m.userData.spin = c;
+    } else if (r.kind === 'dagger') {
       m = new T.Group();
       const d = model('dagger'),
         box = new T.Box3().setFromObject(d),
@@ -929,7 +1099,7 @@ export class View {
         this.rocketViews.set(r.id, m);
       }
       m.position.set(r.x, r.y, r.z);
-      m.quaternion.setFromUnitVectors(new T.Vector3(0, 1, 0), new T.Vector3(r.dx, r.dy, r.dz));
+      m.quaternion.setFromUnitVectors(UP, (this.tmpD ??= new T.Vector3()).set(r.dx, r.dy, r.dz).normalize());
       if (m.userData.spin) m.userData.spin.rotation.z += dt * 25;
     }
     for (const [id, m] of this.rocketViews)
@@ -937,6 +1107,87 @@ export class View {
         m.removeFromParent();
         if (m.userData.ownGeometry) m.geometry.dispose();
         this.rocketViews.delete(id);
+      }
+    this.updateCharges(state, dt);
+    this.updateSmoke(state, dt);
+  }
+  // Smoke grenades: a ball of slowly turning puffs that nobody (and no bot) can see through.
+  updateSmoke(state, dt) {
+    this.smokeViews ??= new Map();
+    const live = new Set();
+    for (const s of state.smokes || []) {
+      live.add(s.id);
+      let v = this.smokeViews.get(s.id);
+      if (!v) {
+        const group = new T.Group(),
+          material = new T.MeshStandardMaterial({
+            color: 0xe6e4df,
+            roughness: 1,
+            transparent: true,
+            opacity: 0.34,
+            depthWrite: false,
+            side: T.DoubleSide,
+          }),
+          geometry = new T.IcosahedronGeometry(1, 2),
+          puffs = [];
+        // Many overlapping soft puffs read as a cloud; a few big ones read as a dome.
+        for (let i = 0; i < 26; i++) {
+          const m = new T.Mesh(geometry, material),
+            a = (i / 26) * Math.PI * 6.3,
+            r = 0.2 + ((i * 29) % 11) / 16;
+          m.position.set(Math.cos(a) * r, ((i % 5) - 1.6) * 0.16 + ((i * 17) % 7) / 40, Math.sin(a) * r);
+          m.scale.setScalar(0.34 + ((i * 37) % 10) / 26);
+          m.userData.spin = 0.15 + ((i * 13) % 7) / 30;
+          group.add(m);
+          puffs.push(m);
+        }
+        this.scene.add(group);
+        v = { group, puffs, geometry, material };
+        this.smokeViews.set(s.id, v);
+      }
+      v.group.position.set(s.x, s.y + 1.1, s.z);
+      v.group.scale.setScalar(Math.max(0.05, s.r * s.grow * 0.62));
+      v.material.opacity = Math.min(0.36, 0.36 * Math.min(1, s.grow * 1.6));
+      for (const m of v.puffs) m.rotation.y += dt * m.userData.spin;
+    }
+    for (const [id, v] of this.smokeViews)
+      if (!live.has(id)) {
+        v.group.removeFromParent();
+        v.geometry.dispose();
+        v.material.dispose();
+        this.smokeViews.delete(id);
+      }
+  }
+  // Planted C4: the charge lies flat against the surface it stuck to, its lamp blinking.
+  updateCharges(state, dt) {
+    const live = new Set();
+    for (const c of state.charges || []) {
+      live.add(c.id);
+      let m = this.chargeViews.get(c.id);
+      if (!m) {
+        m = new T.Group();
+        m.add(model('c4'));
+        const lamp = new T.Mesh(new T.SphereGeometry(0.035, 8, 6), new T.MeshBasicMaterial({ color: 0xff5340 }));
+        lamp.position.set(0.05, 0.1, 0.02);
+        m.add(lamp);
+        m.userData.lamp = lamp;
+        m.userData.t = 0;
+        this.scene.add(m);
+        this.chargeViews.set(c.id, m);
+      }
+      m.position.set(c.x, c.y, c.z);
+      m.quaternion.setFromUnitVectors(UP, (this.tmpD ??= new T.Vector3()).set(c.nx ?? 0, c.ny ?? 1, c.nz ?? 0).normalize());
+      m.userData.t += dt;
+      const blink = Math.sin(m.userData.t * 9) > 0.2;
+      m.userData.lamp.visible = blink;
+      m.userData.lamp.scale.setScalar(blink ? 1 : 0.6);
+    }
+    for (const [id, m] of this.chargeViews)
+      if (!live.has(id)) {
+        m.userData.lamp.geometry.dispose();
+        m.userData.lamp.material.dispose();
+        m.removeFromParent();
+        this.chargeViews.delete(id);
       }
   }
   // Auto quality: when frames stay slow the render resolution drops in steps (to 60 %), and climbs back when
@@ -961,6 +1212,7 @@ export class View {
     }
   }
   update(state, id, dt, menu = false, look = { angle: 0, pitch: 0 }) {
+    const aim = look; // the camera's own look; `look` is reused below for cosmetics
     this.adapt(menu);
     this.lastState = state;
     WORLD.time.value = (WORLD.time.value + dt) % 3600;
@@ -975,12 +1227,29 @@ export class View {
     this.viewTeam = state.players.find((p) => p.id === id)?.team;
     this.localId = id;
     const me = state.players.find((p) => p.id === id),
-      fov = menu ? 50 : look.aim ? WEAPONS[me?.weapon]?.zoom || 55 : 75;
-    if (this.camera.fov !== fov) {
+      freeFall = !!me?.dropping && !me.gliding,
+      // Sprinting, gliding and free fall widen the view a little; the sights narrow it.
+      fov = menu
+        ? 50
+        : look.aim
+          ? WEAPONS[me?.weapon]?.zoom || 55
+          : 75 + (me?.sprinting ? 5 : 0) + (freeFall ? 12 : me?.gliding ? 6 : 0) + (me?.thrusting ? 3 : 0);
+    if (this.camera.fov !== fov && !(menu && state.lobby)) {
       this.camera.fov = T.MathUtils.damp(this.camera.fov, fov, 14, dt);
       this.camera.updateProjectionMatrix();
     }
-    if (menu || !me) {
+    // The lobby: your operator on the stage (lobby-stage.js); otherwise the map from above.
+    this.lobbyStage ??= this.scene.add(makeStage()).children.at(-1);
+    this.lobbyStage.visible = menu && !!state.lobby;
+    if (menu && state.lobby) {
+      this.aimFix = null;
+      this.lobbyStage.position.set(state.lobby.x, state.lobby.y, state.lobby.z);
+      // A wider stage when the group stands on it.
+      const k = state.lobby.party > 2 ? 2.2 : state.lobby.party ? 2 : 1;
+      this.lobbyStage.scale.set(k, 1, k);
+      frameLobby(this.camera, state.lobby, dt);
+    } else if (menu || !me) {
+      this.aimFix = null;
       this.camera.position.set(52, 115, 104);
       this.camera.lookAt(0, 0, 0);
     } else {
@@ -995,11 +1264,68 @@ export class View {
       this.deathT = me.hp <= 0 ? (this.deathT || 0) + dt : 0;
       const fall = Math.min(1, this.deathT / 0.7),
         ease = fall * fall * (3 - 2 * fall);
-      this.camera.position.set(me.x, (me.y || 0) + EYE_HEIGHT - ease * 1.25 - (this.land || 0) * 0.18, me.z);
-      this.camera.lookAt(me.x + d.x, this.camera.position.y + d.y - ease * 0.3, me.z + d.z);
+      // Footsteps: the view bobs with each step and sways a little from side to side, more when sprinting. The
+      // first-person weapon bobs on the same phase (viewmodel.js).
+      const moving = me.hp > 0 && me.grounded && !me.inBus ? me.moving || 0 : 0;
+      this.stepPhase = ((this.stepPhase || 0) + dt * moving * 1.25) % (Math.PI * 200);
+      this.bobAmp = T.MathUtils.damp(this.bobAmp || 0, Math.min(1.3, moving / 5.8) * (me.sprinting ? 1.35 : 1), 10, dt);
+      const third = this.thirdPerson && me.hp > 0 && !me.inBus,
+        bobK = (third ? 0.4 : 1) * this.bobAmp * (look.aim ? 0.3 : 1),
+        stepY = (Math.abs(Math.sin(this.stepPhase)) - 0.6) * 0.05 * bobK,
+        stepX = Math.sin(this.stepPhase) * 0.022 * bobK;
+      this.camera.position.set(
+        me.x + Math.cos(look.angle) * stepX,
+        (me.y || 0) + EYE_HEIGHT - ease * 1.25 - (this.land || 0) * 0.18 + stepY,
+        me.z - Math.sin(look.angle) * stepX,
+      );
+      // Free fall from the bus shakes the view; the jetpack hums.
+      if (freeFall) this.shake = Math.max(this.shake, 0.22);
+      else if (me.thrusting) this.shake = Math.max(this.shake, 0.08);
+      // Third person: the camera swings behind the right shoulder (the character a little left of the crosshair,
+      // the gun on the near side), pulled in when a wall is in the way. Looking steeply up or down it orbits only so
+      // far, so it never dives under the character or into the ground.
+      this.aimFix = null;
+      this.camNear = Infinity;
+      if (third) {
+        const eye = this.camera.position.clone(),
+          side = { x: -Math.cos(look.angle), z: Math.sin(look.angle) },
+          want = 3,
+          orbit = direction(look.angle, Math.max(-1.1, Math.min(0.62, look.pitch))),
+          back = { x: -orbit.x, y: -orbit.y + 0.16, z: -orbit.z },
+          len = Math.hypot(back.x, back.y, back.z) || 1,
+          dir = { x: back.x / len, y: back.y / len, z: back.z / len },
+          from = this.cameraPivot(eye, side),
+          target = this.cameraReach(from, dir, want),
+          // Pulled in at once when something comes between, eased back out when it clears.
+          prev = this.camDist ?? target,
+          dist = target < prev ? target : T.MathUtils.damp(prev, target, 7, dt),
+          cx = from.x + dir.x * dist,
+          cz = from.z + dir.z * dist;
+        this.camDist = dist;
+        this.camera.position.set(cx, Math.max(groundHeight(cx, cz, this.map) + 0.35, from.y + dir.y * dist), cz);
+        this.camera.lookAt(eye.x + d.x * 6, eye.y + d.y * 6 - ease * 0.3, eye.z + d.z * 6);
+        this.camNear = this.camera.position.distanceTo(eye);
+        // Where the crosshair points: the shot goes from the eye to that point (aim.js), sent as offsets to the
+        // look angles by main.js.
+        if (me.hp > 0 && !(me.flashback > 0)) {
+          this.camera.updateMatrixWorld();
+          const fwd = this.camera.getWorldDirection(this.aimDir ??= new T.Vector3());
+          this.aimFix = convergedAim(
+            this.camera.position,
+            fwd,
+            { x: me.x, y: (me.y || 0) + EYE_HEIGHT, z: me.z },
+            look,
+            this.map,
+            { players: state.players, bosses: state.bosses, selfId: id },
+          );
+        }
+      } else this.camera.lookAt(me.x + d.x, this.camera.position.y + d.y - ease * 0.3, me.z + d.z);
       if (ease > 0) this.camera.rotation.z += ease * 0.7;
+      // A slight roll with each step, and a bank while gliding.
+      this.camera.rotation.z += Math.sin(this.stepPhase) * 0.007 * bobK + (me.gliding ? Math.sin((this.clockT || 0) * 0.9) * 0.03 : 0);
       if (this.shake > 0.01) {
-        const k = this.shake * 0.06;
+        // (A camera pulled in against a wall shakes only in rotation: a nudge would push it through.)
+        const k = this.shake * 0.06 * (third && (this.camDist ?? 3) < 0.6 ? 0 : 1);
         this.camera.position.x += (Math.random() - 0.5) * k;
         this.camera.position.y += (Math.random() - 0.5) * k;
         this.camera.rotation.z += (Math.random() - 0.5) * k * 0.4;
@@ -1050,9 +1376,15 @@ export class View {
       const v = this.people.get(p.id) || this.person(p, p.id === id),
         weight = v.initialized ? 1 - Math.exp(-dt * 19) : 1;
       v.initialized = true;
+      // Bots and anyone in the standard finish keep the guns' own materials (nothing is cloned for them).
+      if (v.finish === null && look.finish === 'standard' && look.pattern === 'nopattern') {
+        v.finish = look.finish;
+        v.pattern = look.pattern;
+      }
       if (v.finish !== look.finish || v.pattern !== look.pattern) {
         const color = new T.Color(COSMETICS.find((c) => c.id === look.finish).color);
         for (const g of v.guns) {
+          if (WEAPONS.find((w) => 'Mount_' + w.model === g.name)?.consumable) continue;
           tintObject(g, color);
           applyPattern(g, look.pattern, color);
         }
@@ -1060,20 +1392,42 @@ export class View {
         v.pattern = look.pattern;
       }
       // Characters behind a solid building are not drawn (the occlusion horizon of the scenery).
+      // Riders in the bus sit on its benches (0.27), seen from inside; you are the camera there.
+      const bus = p.inBus && state.bus?.active ? state.bus : null,
+        seat = bus ? BUS_SEATS[state.players.filter((q) => q.inBus).indexOf(p) % BUS_SEATS.length] : null;
       v.root.visible =
-        (menu || p.id !== id) &&
-        !p.inBus &&
+        (menu || p.id !== id || (this.thirdPerson && !p.inBus)) &&
+        (!p.inBus || (!!seat && p.id !== id)) &&
         Math.hypot(p.x - this.camera.position.x, p.z - this.camera.position.z) < (this.viewDistance || 250) &&
         !(this.scenery?.culler.hides(p.x, p.y || 0, (p.y || 0) + 2.4, p.z) ?? false);
-      v.root.position.lerp(
-        new T.Vector3(p.x, p.y || 0, p.z),
-        Math.hypot(v.root.position.x - p.x, v.root.position.z - p.z) > 8 ? 1 : weight,
-      );
-      const diff = Math.atan2(Math.sin(p.angle - v.body.rotation.y), Math.cos(p.angle - v.body.rotation.y));
-      v.body.rotation.y += diff * weight;
+      if (seat) {
+        const yaw = Math.atan2(bus.bx - bus.ax, bus.bz - bus.az),
+          c = Math.cos(yaw),
+          sn = Math.sin(yaw);
+        v.root.position.set(bus.x + seat.x * c + seat.z * sn, bus.y, bus.z - seat.x * sn + seat.z * c);
+        v.yaw = yaw;
+      } else
+        v.root.position.lerp(
+          (this.tmpV ??= new T.Vector3()).set(p.x, p.y || 0, p.z),
+          Math.hypot(v.root.position.x - p.x, v.root.position.z - p.z) > 8 ? 1 : weight,
+        );
+      // Your own character turns with the camera at once; everyone else turns smoothly toward where they aim.
+      // The facing lives in v.yaw: the body's own rotation also carries emote spins, and writing that back over
+      // the facing every frame is what kept every character looking the same way since 0.18.
+      const own = p.id === id && this.thirdPerson && !menu,
+        yaw = seat ? v.yaw : own ? aim.angle : p.angle;
+      if (v.yaw === undefined) v.yaw = yaw;
+      const diff = Math.atan2(Math.sin(yaw - v.yaw), Math.cos(yaw - v.yaw));
+      v.yaw += own ? diff : diff * weight;
+      v.yaw = Math.atan2(Math.sin(v.yaw), Math.cos(v.yaw));
+      const weapon = WEAPONS[p.weapon],
+        stance = stanceOf(weapon);
       if (p.shot !== v.lastShot) {
-        v.recoil = WEAPONS[p.weapon]?.melee ? 0.4 : 0.22;
+        // Swings and throws play their whole clip (sped up); a gunshot is a short kick.
+        v.recoil = stance === 'blade' || stance === 'throw' ? 0.7 : stance === 'fists' ? 0.45 : 0.22;
         v.lastShot = p.shot;
+        // A second swing, punch or throw straight after the first plays the clip again from the start.
+        if (v.animation === 'Punch') v.actions.Punch?.reset().play();
       }
       v.recoil = Math.max(0, v.recoil - dt);
       if (p.hp < v.previousHP && p.hp > 0) v.hitTime = 0.25;
@@ -1099,45 +1453,119 @@ export class View {
       v.emoteClock = emote ? v.emoteClock + dt : 0;
       const dance = emote?.dance;
       v.body.position.y = v.dead > 3 ? v.body.position.y : dance?.bob ? Math.abs(Math.sin(v.emoteClock * (dance.speed || 5))) * dance.bob : 0;
-      v.body.rotation.y = dance?.spin
-        ? v.emoteClock * dance.spin
-        : dance?.step
-          ? Math.sin(Math.round(v.emoteClock * dance.step) * 1.1) * 0.5
-          : 0;
-      const anim =
-        emote
-          ? emote.clip
-          : p.hp <= 0
+      // Locomotion (0.27): the legs go the way the body moves and the chest turns back to the aim; backwards the
+      // gait runs in reverse; standing, the feet stay planted until the chest has turned too far, then step round.
+      const upright = p.hp > 0 && !seat && !emote && !airborne && !p.dropping && !p.gliding && !p.inBus && !(p.healing > 0);
+      this.locomotion(v, p, upright, dt);
+      v.body.rotation.y =
+        v.yaw +
+        (upright ? v.legYaw : 0) +
+        (dance?.spin
+          ? v.emoteClock * dance.spin
+          : dance?.step
+            ? Math.sin(Math.round(v.emoteClock * dance.step) * 1.1) * 0.5
+            : 0);
+      const anim = seat
+        ? 'Sit'
+        : emote
+        ? emote.wave
+          ? 'Wave'
+          : emote.clip
+        : p.hp <= 0
           ? 'Death'
-          : airborne
-            ? 'Jump_Idle'
-            : v.landT > 0 && p.moving < 0.5
-              ? 'Jump_Land'
-              : v.hitTime > 0
-              ? 'HitReact'
-              : p.reload > 0
-                ? 'Idle'
-                : v.recoil > 0 && WEAPONS[p.weapon]?.melee
-                  ? 'Punch'
-                  : p.moving > 0.5
-                    ? walking
-                      ? v.recoil > 0
-                        ? 'Walk_Shoot'
-                        : 'Walk'
-                      : v.recoil > 0
-                        ? 'Run_Shoot'
-                        : 'Run_Gun'
-                    : v.recoil > 0
-                      ? 'Idle_Shoot'
-                      : 'Idle';
-      this.animate(v, anim);
+          : p.healing > 0 && !airborne
+            ? 'Heal'
+            : p.using && !airborne && p.moving < 0.5
+              ? weapon?.deploy || weapon?.model === 'bandage'
+                ? 'Use'
+                : 'Drink'
+            : airborne || p.dropping
+              ? v.air < 0.22 && !p.dropping && !p.gliding
+                ? 'Jump_Start'
+                : 'Jump_Idle'
+              : v.landT > 0 && p.moving < 0.5
+                ? 'Jump_Land'
+                : v.hitTime > 0
+                  ? 'HitReact'
+                  : v.lootT > 0 && p.moving < 0.5
+                    ? 'Loot'
+                  : v.recoil > 0 && stance === 'fists'
+                    ? p.shot % 2
+                      ? 'Jab'
+                      : 'Punch'
+                    : v.recoil > 0 && stance === 'blade'
+                    ? 'Slash'
+                    : v.recoil > 0 && stance === 'throw'
+                      ? 'Throw'
+                      : p.moving > 0.5
+                        ? walking
+                          ? 'Walk'
+                          : p.sprinting
+                            ? 'Sprint'
+                            : 'Run_Gun'
+                        : v.turnStep
+                          ? 'Walk'
+                          : 'Idle';
+      // The soldiers' own clips (Toon Shooter): gaits aim the gun while it fires, strikes and throws are a punch,
+      // drinking and deploying crouch or stand (the arm is posed in poseBody).
+      const firearm = stance !== 'blade' && stance !== 'throw' && stance !== 'none' && stance !== 'item' && stance !== 'fists',
+        shooting = firearm && v.recoil > 0;
+      let clipName = TOON_CLIPS[anim] || anim;
+      if (shooting && (clipName === 'Idle' || clipName === 'Walk' || clipName === 'Run_Gun')) clipName = clipName === 'Idle' ? 'Idle_Shoot' : clipName === 'Walk' ? 'Walk_Shoot' : 'Run_Shoot';
+      this.animate(v, clipName);
+      // Legs keep pace with the ground: each gait's clip runs at the speed it was made for (backwards: reversed).
+      const clip = v.actions[v.animation],
+        gaitName = v.animation;
+      if (clip)
+        clip.timeScale =
+          (v.back && /^(Walk|Run)/.test(gaitName) ? -1 : 1) *
+          (/^Walk/.test(gaitName)
+            ? v.turnStep && p.moving <= 0.5
+              ? 0.9
+              : Math.max(0.6, Math.min(1.8, (p.moving || 0) / 2.4))
+            : /^Run/.test(gaitName)
+              ? Math.max(0.7, Math.min(1.7, (p.moving || 0) / 5.8))
+              : gaitName === 'Punch'
+                ? 1.7
+                : gaitName === 'Jump'
+                  ? 1.6
+                  : 1);
       if (look.effect !== 'noeffect' && p.hp > 0 && !p.inBus && dt > 0) this.cosmeticEffect(v, p, look.effect, dt);
+      // Footfalls kick up a little dust when running close to the camera.
+      v.lootT = Math.max(0, (v.lootT || 0) - dt);
+      if (upright && p.moving > 3 && dt > 0 && !menu && Math.hypot(p.x - this.camera.position.x, p.z - this.camera.position.z) < 28) {
+        v.stepT = (v.stepT || 0) + dt;
+        if (v.stepT > (p.sprinting ? 0.27 : 0.34)) {
+          v.stepT = 0;
+          this.fx.event({ type: 'step', x: p.x, y: p.y || 0, z: p.z });
+        }
+      }
+      restorePose(v);
       v.mixer.update(dt);
-      for (const g of v.guns) g.visible = g.name === CHARACTER_GUNS[p.weapon];
+      savePose(v);
+      // The upper body bends with the aim: characters look up and down, not only left and right.
+      // Low ready (the lobby stage): the body stands straight and the gun rests pointing down in front.
+      const pitch = p.lowReady ? 0 : p.id === id && !menu ? aim.pitch : p.pitch || 0;
+      if (upright && v.legYaw) this.twistTorso(v, -v.legYaw);
+      if (p.hp > 0 && !p.inBus && !emote) this.bendTorso(v, pitch, upright ? v.yaw : v.body.rotation.y);
+      this.poseBody(v, p, dt, { fists: !!weapon?.fists && upright && v.animation !== 'Punch' && v.animation !== 'HitReact' && !p.lowReady, drink: !!p.using && !weapon?.deploy && weapon?.model !== 'bandage' ? 1 - p.using.t / (p.using.time || 1) : -1 });
+      // The weapon or item in the right hand (the rig carries them all; only the one held shows). Nothing is held
+      // while healing, dancing, gliding or falling out of the bus.
+      const busy = !!emote || (p.healing > 0 && !airborne) || p.gliding || (p.dropping && !p.gliding) || p.inBus,
+        shown = busy ? null : characterGun(weapon);
+      if (shown && !v.guns.some((g) => g.name === shown)) this.mountGun(v, weapon);
+      for (const g of v.guns) g.visible = g.name === shown;
       if (v.gear.jetpack) v.gear.jetpack.visible = p.gear?.id === 'jetpack' && p.hp > 0;
       if (v.gear.glider) v.gear.glider.visible = !!p.gliding && p.hp > 0;
+      if (v.gear.shield) v.gear.shield.visible = p.gear?.id === 'shield' && p.gear.hp > 0 && p.hp > 0;
+      if (v.vests) for (const [tier, mesh] of Object.entries(v.vests)) mesh.visible = p.armorTier === tier && p.hp > 0;
       if (p.thrusting && p.hp > 0 && dt > 0) this.fx.jet(p, dt);
-      v.hp.visible = v.label.visible = p.hp > 0;
+      // Your own name and health bar would float right under the crosshair in third person: others' only.
+      // On the lobby stage: no health bars; group members keep their names, you have the name plate.
+      v.hp.visible = p.hp > 0 && (menu || p.id !== id) && !state.lobby && !p.inBus;
+      v.label.visible = p.hp > 0 && (menu || p.id !== id) && !(state.lobby && p.id === id) && !p.inBus;
+      // Pulled in against a wall, the camera would sit inside your own head: then the body is not drawn.
+      if (p.id === id && !menu && this.camNear < 0.75) v.root.visible = false;
       if (v.dead > 6) v.root.visible = false;
       v.bar.scale.x = (0.7 * p.hp) / 100;
       v.bar.position.x = -(0.7 - v.bar.scale.x) / 2;
@@ -1150,6 +1578,10 @@ export class View {
         this.people.delete(pid);
       }
     this.syncWorld(state, dt);
+    // Launch pads, cover walls and campfires (0.27).
+    this.deploys ??= new DeployViews(this.scene, this.fx);
+    this.deploys.setMap(this.map);
+    this.deploys.update(menu ? [] : state.deployables, dt);
     this.scenery?.cull(this.camera, this.viewDistance || 250);
     this.grass?.update(this.camera, state.players);
     this.scenery?.update(dt, this.fx);
@@ -1181,76 +1613,8 @@ export class View {
     }
     for (const water of this.waters) water.material.uniforms.time.value += dt;
     this.renderer.autoClear = true;
-    const drawWeapon = !menu && me && me.hp > 0 && state.winner === null && !(me.flashback > 0) && !me.inBus;
-    if (drawWeapon) {
-      const held = WEAPONS[me.weapon];
-      if (this.fpShot !== me.shot) {
-        if (this.fpShot >= 0) {
-          if (held.melee) {
-            this.swing = 1;
-            this.swingSide = -this.swingSide;
-          } else this.fpRecoil = 0.11;
-        }
-        this.fpShot = me.shot;
-      }
-      this.swing = Math.max(0, this.swing - dt / Math.min(0.42, held.interval || 0.4));
-      // Weapon switch: lower the old weapon, then raise the new one (also used when spawning).
-      if (this.previousWeapon !== me.weapon) {
-        this.switchFrom = this.previousWeapon >= 0 ? this.previousWeapon : me.weapon;
-        this.switchT = this.previousWeapon >= 0 ? 1 : 0.5;
-        this.previousWeapon = me.weapon;
-      }
-      if (this.spawnRaise) {
-        this.switchFrom = me.weapon;
-        this.switchT = 0.5;
-        this.spawnRaise = false;
-      }
-      this.switchT = Math.max(0, (this.switchT || 0) - dt / 0.42);
-      const lowering = this.switchT > 0.5,
-        drop = lowering ? 1 - (this.switchT - 0.5) * 2 : this.switchT * 2,
-        shown = lowering ? this.switchFrom : me.weapon,
-        swapEase = drop * drop * (3 - 2 * drop);
-      this.fpRecoil = Math.max(0, this.fpRecoil - dt);
-      this.fpPhase += dt * me.moving * 2;
-      this.land = Math.max(0, (this.land || 0) - dt * 2.2);
-      const bob = Math.min(me.moving / 5, 1),
-        reloadTime = (held.reload || 1) * (RARITIES[me.rarity]?.reload || 1),
-        rt = me.reload > 0 ? Math.min(1, Math.max(0, 1 - me.reload / reloadTime)) : -1,
-        style = RELOAD_STYLE[held.model] || (held.melee ? 'none' : 'mag'),
-        pose = reloadPose(style, rt),
-        // Melee swing: wind-up then a fast diagonal slash, alternating sides.
-        t = 1 - this.swing,
-        slash = this.swing > 0 ? Math.sin(Math.min(1, t * 1.25) * Math.PI) : 0,
-        side = this.swingSide;
-      this.fp.position.set(
-        (look.aim && !held.melee ? 0.08 : 0.24) + Math.sin(this.fpPhase) * 0.009 * bob - slash * 0.22 * side + pose.x,
-        -0.23 +
-          Math.abs(Math.cos(this.fpPhase)) * 0.009 * bob +
-          pose.y -
-          swapEase * 0.38 -
-          this.land * 0.12 -
-          (me.healing > 0 ? 0.3 : 0) +
-          slash * 0.05,
-        -0.58 + this.fpRecoil * 0.65 - slash * 0.18 + pose.z,
-      );
-      this.fp.rotation.set(
-        this.fpRecoil * 1.2 + pose.rx - slash * 0.9 - swapEase * 0.7,
-        slash * 0.5 * side + pose.ry,
-        pose.rz - (me.sprinting ? 0.35 : 0) + slash * 1.1 * side,
-      );
-      this.fpGuns.forEach((g, i) => {
-        g.visible = i === shown;
-        g.userData.flash.visible = this.fpRecoil > 0.055 && i === me.weapon;
-        if (i === me.weapon && g.userData.barrels) g.userData.barrels.rotation.x += dt * (me.spin || 0) * 32;
-        const mag = g.userData.mag;
-        if (mag) {
-          // A fresh magazine rises into the weapon mid-reload.
-          mag.visible = i === me.weapon && rt > 0.3 && rt < 0.75;
-          mag.position.y = mag.userData.y - (1 - Math.min(1, (rt - 0.3) / 0.35)) * 0.34;
-        }
-      });
-      this.fpGlider.visible = !!me.gliding;
-    }
+    const drawWeapon = !menu && !this.thirdPerson && me && me.hp > 0 && state.winner === null && !(me.flashback > 0) && !me.inBus;
+    if (drawWeapon) poseViewWeapon(this, me, aim, dt);
     this.bossViews ||= new BossViews(this);
     this.bossViews.update(state, dt, this.camera, id);
     this.camera.updateMatrixWorld();
@@ -1272,14 +1636,216 @@ export class View {
   // Compiles every material's shaders for the target the frame really renders into (the composer's buffer when
   // post-processing is on), so the first match frame does not stall.
   async precompile() {
-    const target = this.renderer.getRenderTarget();
+    const target = this.renderer.getRenderTarget(),
+      // Boss bodies, telegraphs, pools and spikes only appear in a fight: build one of each for the compile.
+      cool = (this.bossViews ||= new BossViews(this)).warmup();
     this.renderer.setRenderTarget(this.composer ? this.composer.readBuffer : null);
     try {
       await this.renderer.compileAsync(this.scene, this.camera);
       await this.renderer.compileAsync(this.weaponScene, this.weaponCamera);
     } finally {
       this.renderer.setRenderTarget(target);
+      cool();
     }
+  }
+  // Whole-body poses the animation clips do not have: leaning into a sprint or the jetpack's thrust, hanging
+  // under the glider with both hands up on the bar, spread-eagled in free fall out of the bus, and the gun tipped
+  // down while reloading. Applied after the mixer, as rotations in each bone's parent space.
+  // Poses on top of the clip: the lean into a sprint, the jetpack and free fall, arms spread in free fall and up on
+  // the glider bar, the gun tipped down for a reload; bare hands up in a guard, a bottle raised to the mouth.
+  poseBody(v, p, dt, extra = {}) {
+    const alive = p.hp > 0 && !p.inBus,
+      freeFall = alive && p.dropping && !p.gliding,
+      gliding = alive && p.gliding,
+      target = !alive ? 0 : freeFall ? 1.25 : gliding ? 0.38 : p.thrusting ? 0.32 : p.sprinting ? 0.14 : 0;
+    v.lean = T.MathUtils.damp(v.lean || 0, target, 5, dt);
+    v.spread = T.MathUtils.damp(v.spread || 0, freeFall ? 1 : 0, 5, dt);
+    v.hang = T.MathUtils.damp(v.hang || 0, gliding ? 1 : 0, 6, dt);
+    v.guardK = T.MathUtils.damp(v.guardK || 0, extra.fists ? 1 : 0, 10, dt);
+    v.drinkK = T.MathUtils.damp(v.drinkK || 0, extra.drink >= 0 ? 1 : 0, 8, dt);
+    v.body.rotation.x = v.lean;
+    if (v.lean > 0.02) {
+      // Tip about the middle of the body, not the feet.
+      const k = 0.9 * Math.sin(v.lean),
+        yaw = v.body.rotation.y;
+      v.body.position.y += 0.9 * (1 - Math.cos(v.lean));
+      v.body.position.x = -Math.sin(yaw) * k;
+      v.body.position.z = -Math.cos(yaw) * k;
+    } else v.body.position.x = v.body.position.z = 0;
+    if (v.bones === undefined)
+      v.bones = {
+        armL: rigBone(v.body, 'UpperArm.L'),
+        armR: rigBone(v.body, 'UpperArm.R'),
+        foreL: rigBone(v.body, 'LowerArm.L'),
+        foreR: rigBone(v.body, 'LowerArm.R'),
+      };
+    const B = v.bones,
+      q = (this.poseQ ??= new T.Quaternion()),
+      bodyQ = (this.poseBodyQ ??= new T.Quaternion()),
+      axis = (this.poseAxis ??= new T.Vector3()),
+      turn = (bone, ax, ay, az, angle) => {
+        if (!bone?.parent || !angle) return;
+        // An axis given in the body's frame, turned into the bone's parent frame.
+        v.body.getWorldQuaternion(bodyQ);
+        bone.parent.updateWorldMatrix(true, false);
+        bone.parent.getWorldQuaternion(q).invert();
+        axis.set(ax, ay, az).applyQuaternion(bodyQ).applyQuaternion(q).normalize();
+        bone.quaternion.premultiply(q.setFromAxisAngle(axis, angle));
+      };
+    // Free fall: arms out and up like a skydiver.
+    if (v.spread > 0.01) {
+      turn(B.armL, 0, 0, 1, 1.25 * v.spread);
+      turn(B.armR, 0, 0, 1, -1.25 * v.spread);
+      turn(B.armL, 1, 0, 0, -0.5 * v.spread);
+      turn(B.armR, 1, 0, 0, -0.5 * v.spread);
+    }
+    // Glider: both hands up on the bar above the head.
+    if (v.hang > 0.01) {
+      turn(B.armL, 1, 0, 0, -2.2 * v.hang);
+      turn(B.armR, 1, 0, 0, -2.2 * v.hang);
+      turn(B.foreL, 1, 0, 0, -0.4 * v.hang);
+      turn(B.foreR, 1, 0, 0, -0.4 * v.hang);
+    }
+    // Bare hands: forearms up, fists in front of the face, a little bounce.
+    if (v.guardK > 0.01) {
+      const g = v.guardK,
+        G = this.guardPose || GUARD,
+        bob = Math.sin(performance.now() / 240) * 0.06;
+      turn(B.armL, 0, 0, 1, G.inL * g);
+      turn(B.armR, 0, 0, 1, -G.inL * g);
+      turn(B.armL, 1, 0, 0, (G.up + bob) * g);
+      turn(B.armR, 1, 0, 0, (G.up + 0.1 - bob) * g);
+      turn(B.foreL, 1, 0, 0, G.fore * g);
+      turn(B.foreR, 1, 0, 0, G.fore * g);
+      turn(B.foreL, 0, 1, 0, G.twist * g);
+      turn(B.foreR, 0, 1, 0, -G.twist * g);
+    }
+    // Drinking: the right hand comes up to the mouth and tips the bottle back.
+    if (v.drinkK > 0.01) {
+      const d = v.drinkK,
+        sip = extra.drink >= 0 ? Math.sin(extra.drink * 18) * 0.08 : 0;
+      turn(B.armR, 1, 0, 0, (-0.9 + sip) * d);
+      turn(B.foreR, 1, 0, 0, -1.7 * d);
+      turn(B.armR, 0, 1, 0, -0.5 * d);
+    }
+    // Reload: the gun tips down and comes back up.
+    const w = WEAPONS[p.weapon];
+    if (alive && p.reload > 0 && w && !w.melee) {
+      const total = (w.reload || 1) * (RARITIES[p.rarity]?.reload || 1),
+        k = Math.sin(Math.PI * Math.min(1, Math.max(0, 1 - p.reload / total)));
+      turn(B.foreR, 1, 0, 0, 0.55 * k);
+      turn(B.foreL, 0, 1, 0, 0.4 * k);
+    }
+  }
+  // Where the legs point relative to the aim (v.legYaw) and whether the gait runs backwards (v.back). Moving: toward
+  // the direction of travel (up to 63° off the aim; beyond ~110° the character backpedals instead). Standing: the
+  // feet keep their place (v.feetYaw) until the chest is 55° round, then step round to face the aim (v.turnStep).
+  locomotion(v, p, upright, dt) {
+    const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a)),
+      mx = p.x - (v.px ?? p.x),
+      mz = p.z - (v.pz ?? p.z);
+    v.px = p.x;
+    v.pz = p.z;
+    if (Math.hypot(mx, mz) > 1e-4) {
+      const yaw = Math.atan2(mx, mz);
+      v.moveYaw = v.moveYaw === undefined ? yaw : v.moveYaw + wrap(yaw - v.moveYaw) * Math.min(1, dt * 14);
+    }
+    v.legYaw ??= 0;
+    if (!upright) {
+      v.feetYaw = v.yaw;
+      v.turnStep = false;
+      v.back = false;
+      v.legYaw = 0;
+      return;
+    }
+    if (p.moving > 0.5 && v.moveYaw !== undefined) {
+      const rel = wrap(v.moveYaw - v.yaw);
+      let target;
+      if (Math.abs(rel) <= 1.95) {
+        v.back = false;
+        target = Math.max(-1.1, Math.min(1.1, rel));
+      } else {
+        v.back = true;
+        target = Math.max(-0.9, Math.min(0.9, wrap(rel - Math.PI)));
+      }
+      v.legYaw += wrap(target - v.legYaw) * Math.min(1, dt * 10);
+      v.feetYaw = v.yaw + v.legYaw;
+      v.turnStep = false;
+      return;
+    }
+    v.back = false;
+    v.feetYaw ??= v.yaw;
+    const twist = wrap(v.yaw - v.feetYaw);
+    if (Math.abs(twist) > 0.95) v.turnStep = true;
+    if (v.turnStep) {
+      v.feetYaw += Math.sign(twist) * Math.min(Math.abs(twist), 4.5 * dt);
+      if (Math.abs(wrap(v.yaw - v.feetYaw)) < 0.06) v.turnStep = false;
+    }
+    v.legYaw = wrap(v.feetYaw - v.yaw);
+  }
+  // Turns the chest about the vertical, spread over the spine and neck (the hips stay with the legs).
+  twistTorso(v, angle) {
+    v.twistBones ??= [['Abdomen', 0.5], ['Torso', 0.5]]
+      .map(([n, k]) => [rigBone(v.body, n), k])
+      .filter(([b]) => b?.parent);
+    const q = (this.twistQ ??= new T.Quaternion()),
+      axis = (this.twistAxis ??= new T.Vector3());
+    for (const [bone, k] of v.twistBones) {
+      bone.parent.updateWorldMatrix(true, false);
+      bone.parent.getWorldQuaternion(q).invert();
+      axis.set(0, 1, 0).applyQuaternion(q).normalize();
+      bone.quaternion.premultiply(q.setFromAxisAngle(axis, angle * k));
+    }
+  }
+  // Leans the torso bone about the horizontal axis across the aim, after the animation has posed the rig.
+  // The pitch is shared between the three spine bones and the neck, so the chest and the head follow the aim.
+  bendTorso(v, pitch, yaw) {
+    if (!pitch) return;
+    v.spine ??= [['Abdomen', 0.22], ['Torso', 0.3], ['Neck', 0.18]]
+      .map(([n, k]) => [rigBone(v.body, n), k])
+      .filter(([b]) => b?.parent);
+    const q = (this.bendQ ??= new T.Quaternion()),
+      axis = (this.bendAxis ??= new T.Vector3()),
+      a = -Math.max(-1.2, Math.min(1.2, pitch));
+    for (const [bone, k] of v.spine) {
+      bone.parent.updateWorldMatrix(true, false);
+      bone.parent.getWorldQuaternion(q).invert();
+      axis.set(Math.cos(yaw), 0, -Math.sin(yaw)).applyQuaternion(q).normalize();
+      bone.quaternion.premultiply(q.setFromAxisAngle(axis, a * k));
+    }
+  }
+  // Third-person camera collision (0.28). The pivot over the right shoulder is pulled in toward the head when a wall
+  // or a ceiling is closer than the shoulder offset (it used to start inside the wall, and the camera looked through
+  // it); every ray starts from a point known to be free.
+  cameraPivot(eye, side) {
+    const up = castMap(eye, { x: 0, y: 1, z: 0 }, 0.6, this.map).distance,
+      h = Math.max(0, Math.min(0.32, up - 0.22)),
+      top = { x: eye.x, y: eye.y + h, z: eye.z },
+      reach = castMap(top, { x: side.x, y: 0, z: side.z }, 0.85, this.map).distance,
+      s = Math.max(0, Math.min(0.55, reach - 0.3));
+    return { x: top.x + side.x * s, y: top.y, z: top.z + side.z * s };
+  }
+  // How far the camera may go back along `dir` from the pivot: a fan of five rays (the centre and the corners of a
+  // 0.5 m square round it) stands in for the camera's own volume, so the near plane never slides into a wall beside
+  // the centre ray. No minimum: right against a wall the camera comes all the way in (and your own body is hidden).
+  cameraReach(from, dir, want) {
+    const r = { x: dir.z, y: 0, z: -dir.x },
+      rl = Math.hypot(r.x, r.z) || 1;
+    r.x /= rl;
+    r.z /= rl;
+    const u = { x: r.y * dir.z - r.z * dir.y, y: r.z * dir.x - r.x * dir.z, z: r.x * dir.y - r.y * dir.x };
+    let best = want;
+    for (const [a, b] of [[0, 0], [0.22, 0.14], [-0.22, 0.14], [0.22, -0.14], [-0.22, -0.14]]) {
+      const o = { x: from.x + r.x * a + u.x * b, y: from.y + r.y * a + u.y * b, z: from.z + r.z * a + u.z * b };
+      // A corner ray that starts inside something only counts from the centre ray's point of view.
+      if (a && castMap(from, { x: o.x - from.x, y: o.y - from.y, z: o.z - from.z }, 1, this.map).distance < 0.99) continue;
+      best = Math.min(best, castMap(o, dir, want, this.map).distance - 0.28);
+    }
+    return Math.max(0.05, Math.min(want, best));
+  }
+  // First or third person. In third person the camera sits behind the shoulder and your own character is drawn.
+  setThirdPerson(on) {
+    this.thirdPerson = !!on;
   }
   // View distance: fog, the camera's far plane, the shadow box and scenery culling all follow it.
   setViewDistance(d = 250) {

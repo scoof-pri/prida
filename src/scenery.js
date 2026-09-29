@@ -328,7 +328,7 @@ export class Scenery {
       }
     }
     // Windows: frame and glass reach through the wall so both sides show; a stone sill outside, curtains inside.
-    const frameB = batch('window-frame', unitBox, detailMaterial('metal', 0xffffff, { box: true, roughness: 0.45, metalness: 0.1, key: 'frame' }), {
+    const frameB = batch('window-frame', unitBox, detailMaterial('steel', 0xffffff, { box: true, roughness: 0.45, metalness: 0.1, key: 'frame' }), {
         colors: true,
       }),
       sillB = batch('window-sill', unitBox, detailMaterial('concrete', 0xd6d0c4, { box: true, key: 'sill' })),
@@ -410,7 +410,7 @@ export class Scenery {
       // Furniture indoors sits in the walls' shadow anyway: it skips the shadow pass (it is most of the triangles).
       const car = !!DECOR_INFO[d.model]?.car;
       modelParts('decor-' + d.model).forEach((part, k) => {
-        const material = part.material.map ? (car ? carMaterial(part.material) : streetMaterial(part.material)) : kitMaterial(part.material),
+        const material = part.material.map ? (car ? carMaterial(part.material) : streetMaterial(part.material, d.model)) : kitMaterial(part.material),
           bt = batch((indoor ? 'decor-in:' : 'decor:') + d.model + ':' + k, part.geometry, material, { colors: true, shadow: !indoor });
         link(this.byDecor, d.id, bt, bt.add(at.clone().multiply(part.matrix), 0xffffff, group));
       });

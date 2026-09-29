@@ -5,7 +5,7 @@
 // breaks is removed by collapsing its vertex range; a falling roof is rebuilt as its own group for the animation.
 import * as T from 'three';
 import { uvMaterial, lookOf, surfaceTint, glassMaterial } from './materials.js';
-import { seededRandom } from './world.js';
+import { roofStyle, roofTop, chimneyOf, roofPlan, PARAPET } from './world.js';
 
 // Wall finish of a building (the scenery panels use the same choice).
 export function facadeOf(b) {
@@ -14,18 +14,9 @@ export function facadeOf(b) {
   if (b.category === 'office') return b.id % 2 ? 'panels' : 'plaster';
   return b.id % 4 === 1 ? 'bricks' : 'plaster';
 }
-export function roofStyle(b) {
-  if (b.category === 'home') return Math.abs(b.w - b.d) < 3.5 && (b.id + b.w) % 3 === 0 ? 'hip' : 'gable';
-  if (b.category === 'industry') return ['warehouse', 'hangar'].includes(b.type) ? 'shed' : ['factory', 'workshop'].includes(b.type) ? 'saw' : 'flat';
-  return 'flat';
-}
-// Height you stand on when on the roof (the top of the collision box above the last storey).
-export const roofTop = (b) => (b.height - b.roofBase > 0.3 ? b.height : b.roofBase);
-// Smokestack of the big industrial buildings (the chimney smoke rises from its top).
-export function chimneyOf(b) {
-  if (b.category !== 'industry' || b.height < 9) return null;
-  return { x: b.x + b.w * 0.25, z: b.z - b.d * 0.2, base: b.roofBase, top: roofTop(b) + 6 + (b.id % 3) * 1.5, r: 0.85 };
-}
+// Roof style, the height you stand on, the smokestack and the plan of what stands on a roof live in world.js: the
+// map needs them for roof chests and for the collision boxes of everything up there.
+export { roofStyle, roofTop, chimneyOf } from './world.js';
 // Materials of the roof field, created once and shared by every map.
 let MATS = null;
 function mats() {
@@ -39,10 +30,10 @@ function mats() {
     bricks: uvMaterial('bricks'),
     panels: uvMaterial('panels'),
     concrete: uvMaterial('concrete'),
-    metal: uvMaterial('metal', { roughness: 0.5, metalness: 0.7 }),
+    metal: uvMaterial('steel', { roughness: 0.5, metalness: 0.7 }),
     glass: glassMaterial(),
   };
-  MATS.textureOf = { slate: 'roof', clay: 'claytiles', sheet: 'corrugated', gravel: 'gravel', plaster: 'plaster', bricks: 'bricks', panels: 'panels', concrete: 'concrete', metal: 'metal', glass: 'concrete' };
+  MATS.textureOf = { slate: 'roof', clay: 'claytiles', sheet: 'corrugated', gravel: 'gravel', plaster: 'plaster', bricks: 'bricks', panels: 'panels', concrete: 'concrete', metal: 'steel', glass: 'concrete' };
   return MATS;
 }
 
@@ -129,10 +120,10 @@ class Mesher {
 
 const grey = (k) => new T.Color().setRGB(k, k, k, T.LinearSRGBColorSpace);
 // Pitched roof: two slopes meeting at a ridge along the long side (gable) or four slopes (hip).
-function pitched(m, b, rnd, hip) {
+function pitched(m, b, plan, hip) {
   const clay = b.id % 2 === 0,
     key = clay ? 'clay' : 'slate',
-    shade = 0.82 + rnd() * 0.22,
+    shade = plan.shade,
     tile = surfaceTint(clay ? 'claytiles' : 'roof', clay ? 0xffffff : [0x8d949c, 0x7a7065, 0x6d7a82][b.id % 3]).multiplyScalar(shade),
     wall = surfaceTint(facadeOf(b), b.color),
     trim = surfaceTint('concrete', 0xf0ece4),
@@ -222,29 +213,26 @@ function pitched(m, b, rnd, hip) {
     }
   }
   // Brick chimney through one slope, with a concrete cap.
-  if (rnd() < 0.85) {
-    const u = (rnd() - 0.5) * L * 0.5,
-      v = (rnd() < 0.5 ? -1 : 1) * run * 0.35,
-      c = P(u, 0, v),
-      top = yr + 0.7,
+  if (plan.chimney) {
+    const c = plan.chimney,
       brick = surfaceTint('bricks', 0xd9c8b8);
-    m.box('bricks', c.x, ye, c.z, 0.7, top - ye, 0.7, brick, { top: 'concrete', topColor: trim });
-    m.box('concrete', c.x, top, c.z, 0.86, 0.1, 0.86, trim);
+    m.box('bricks', c.x, c.base, c.z, 0.7, c.top - c.base, 0.7, brick, { top: 'concrete', topColor: trim });
+    m.box('concrete', c.x, c.top, c.z, 0.86, 0.1, 0.86, trim);
   }
 }
 const facadeKey = (b) => facadeOf(b);
 // Flat roof: the attic band up to the roof deck, a parapet with coping and an assortment of rooftop plant.
-function flat(m, b, rnd, deck = roofTop(b)) {
+function flat(m, b, plan, deck = roofTop(b)) {
   const wall = surfaceTint(facadeOf(b), b.color),
     trim = surfaceTint('concrete', 0xd8d4ca),
-    gravel = surfaceTint('gravel', 0xffffff).multiplyScalar(0.9 + rnd() * 0.2),
+    gravel = surfaceTint('gravel', 0xffffff).multiplyScalar(plan.gravel),
     key = facadeKey(b),
     w = b.w,
     d = b.d;
   if (deck - b.roofBase > 0.05) m.box(key, b.x, b.roofBase - 0.02, b.z, w, deck - b.roofBase + 0.02, d, wall, { top: 'gravel', topColor: gravel });
   else m.quad('gravel', V(b.x - w / 2, deck + 0.01, b.z + d / 2), V(b.x + w / 2, deck + 0.01, b.z + d / 2), V(b.x + w / 2, deck + 0.01, b.z - d / 2), V(b.x - w / 2, deck + 0.01, b.z - d / 2), gravel);
   // Parapet: four walls along the edge (outer faces flush with the facade) and a coping on top.
-  const ph = 0.85,
+  const ph = PARAPET.h - 0.08,
     t = 0.25;
   m.box(key, b.x, deck, b.z + d / 2 - t / 2, w, ph, t, wall, { top: null });
   m.box(key, b.x, deck, b.z - d / 2 + t / 2, w, ph, t, wall, { top: null });
@@ -255,67 +243,38 @@ function flat(m, b, rnd, deck = roofTop(b)) {
   m.box('concrete', b.x, cy, b.z - d / 2 + t / 2, w + 0.12, 0.08, t + 0.12, trim);
   m.box('concrete', b.x + w / 2 - t / 2, cy, b.z, t + 0.12, 0.08, d - 2 * t, trim);
   m.box('concrete', b.x - w / 2 + t / 2, cy, b.z, t + 0.12, 0.08, d - 2 * t, trim);
-  // Rooftop plant on a grid of free spots.
-  const free = [],
-    step = 3.2;
-  for (let x = -w / 2 + 2.2; x <= w / 2 - 2.2; x += step)
-    for (let z = -d / 2 + 2.2; z <= d / 2 - 2.2; z += step) free.push([b.x + x, b.z + z]);
-  for (let i = free.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [free[i], free[j]] = [free[j], free[i]];
-  }
-  const chimney = chimneyOf(b);
-  const take = () => {
-    while (free.length) {
-      const s = free.pop();
-      if (!chimney || Math.hypot(s[0] - chimney.x, s[1] - chimney.z) > 3) return s;
-    }
-    return null;
-  };
-  const metal = surfaceTint('metal', 0xc9ccce),
+  // Rooftop plant (world.js roofPlan: the same spots carry collision boxes).
+  const metal = surfaceTint('steel', 0xc9ccce),
     dark = grey(0.03);
-  // Stair and lift housing on taller buildings.
-  if ((b.storeys || 0) >= 3) {
-    const s = take();
-    if (s) {
-      m.box(key, s[0], deck, s[1], 2.8, 2.9, 3.2, wall, { top: 'concrete', topColor: trim });
-      m.box('metal', s[0], deck, s[1] + 1.61, 1.0, 2.1, 0.04, surfaceTint('metal', 0x59636b));
-    }
-  }
-  const units = 1 + Math.floor(rnd() * 3 + Math.min(3, (w * d) / 160));
-  for (let i = 0; i < units; i++) {
-    const s = take();
-    if (!s) break;
-    const kind = rnd();
-    if (kind < 0.55) {
+  for (const it of plan.items) {
+    const [x, z] = [it.x, it.z];
+    if (it.kind === 'housing') {
+      // Stair and lift housing on taller buildings.
+      m.box(key, x, deck, z, 2.8, 2.9, 3.2, wall, { top: 'concrete', topColor: trim });
+      m.box('metal', x, deck, z + 1.61, 1.0, 2.1, 0.04, surfaceTint('steel', 0x59636b));
+    } else if (it.kind === 'ac') {
       // Air-conditioning unit: a metal cabinet with a dark fan on top.
-      const rot = rnd() < 0.5;
-      m.box('concrete', s[0], deck, s[1], rot ? 1.4 : 2.0, 0.12, rot ? 2.0 : 1.4, trim);
-      m.box('metal', s[0], deck + 0.12, s[1], rot ? 1.2 : 1.8, 1.0, rot ? 1.8 : 1.2, metal);
-      m.cylinder('metal', s[0], deck + 1.12, s[1], 0.45, 0.04, 12, dark);
-    } else if (kind < 0.75) {
+      const rot = it.rot;
+      m.box('concrete', x, deck, z, rot ? 1.4 : 2.0, 0.12, rot ? 2.0 : 1.4, trim);
+      m.box('metal', x, deck + 0.12, z, rot ? 1.2 : 1.8, 1.0, rot ? 1.8 : 1.2, metal);
+      m.cylinder('metal', x, deck + 1.12, z, 0.45, 0.04, 12, dark);
+    } else if (it.kind === 'tank') {
       // Water tank on legs.
-      for (const [lx, lz] of [[-0.8, -0.8], [0.8, -0.8], [-0.8, 0.8], [0.8, 0.8]]) m.box('metal', s[0] + lx, deck, s[1] + lz, 0.12, 1.2, 0.12, metal);
-      m.cylinder('metal', s[0], deck + 1.2, s[1], 1.15, 1.9, 14, surfaceTint('metal', 0x9aa0a4), { topKey: 'metal' });
-    } else if (kind < 0.9) {
+      for (const [lx, lz] of [[-0.8, -0.8], [0.8, -0.8], [-0.8, 0.8], [0.8, 0.8]]) m.box('metal', x + lx, deck, z + lz, 0.12, 1.2, 0.12, metal);
+      m.cylinder('metal', x, deck + 1.2, z, 1.15, 1.9, 14, surfaceTint('steel', 0x9aa0a4), { topKey: 'metal' });
+    } else if (it.kind === 'skylight') {
       // Skylight: a glass hood on a concrete kerb.
-      m.box('concrete', s[0], deck, s[1], 1.8, 0.3, 2.4, trim, { top: null });
-      m.box('glass', s[0], deck + 0.3, s[1], 1.6, 0.35, 2.2, grey(1));
-    } else {
+      m.box('concrete', x, deck, z, 1.8, 0.3, 2.4, trim, { top: null });
+      m.box('glass', x, deck + 0.3, z, 1.6, 0.35, 2.2, grey(1));
+    } else if (it.kind === 'antenna') {
       // Antenna mast with a small dish.
-      m.cylinder('metal', s[0], deck, s[1], 0.06, 4.2, 6, metal);
-      m.cylinder('metal', s[0] + 0.25, deck + 2.6, s[1], 0.32, 0.08, 10, metal);
-    }
-  }
-  // A few vent pipes.
-  for (let i = 0; i < 3; i++) {
-    const s = take();
-    if (!s) break;
-    m.cylinder('metal', s[0] + (rnd() - 0.5), deck, s[1] + (rnd() - 0.5), 0.12, 0.7 + rnd() * 0.6, 8, metal);
+      m.cylinder('metal', x, deck, z, 0.06, 4.2, 6, metal);
+      m.cylinder('metal', x + 0.25, deck + 2.6, z, 0.32, 0.08, 10, metal);
+    } else if (it.kind === 'vent') m.cylinder('metal', x, deck, z, 0.12, it.h, 8, metal);
   }
 }
 // Industrial roofs: a low corrugated gable (shed) or a sawtooth with glazed north lights.
-function industrial(m, b, rnd, saw) {
+function industrial(m, b, saw) {
   const sheet = surfaceTint('corrugated', [0xb7bcb8, 0x9a7a62, 0x7d8c94][b.id % 3]),
     wall = surfaceTint(facadeOf(b), b.color),
     trim = surfaceTint('concrete', 0xcfcac0),
@@ -346,12 +305,11 @@ function industrial(m, b, rnd, saw) {
     ]);
     // Glazing facing -z under the high edge, with a frame.
     m.quad('glass', V(x1, ye, z0), V(x0, ye, z0), V(x0, ye + h, z0), V(x1, ye + h, z0), grey(1));
-    m.box('metal', b.x, ye + h - 0.08, z0, b.w, 0.1, 0.08, surfaceTint('metal', 0x6b7479), { top: 'metal' });
+    m.box('metal', b.x, ye + h - 0.08, z0, b.w, 0.1, 0.08, surfaceTint('steel', 0x6b7479), { top: 'metal' });
     // Side triangles in the facade finish.
     m.tri(key, V(x0, ye, z0), V(x0, ye, z1), V(x0, ye + h, z0), wall);
     m.tri(key, V(x1, ye, z1), V(x1, ye, z0), V(x1, ye + h, z0), wall);
   }
-  void rnd;
 }
 function pitchedSheet(m, b, ye, top, sheet, wall, trim, key, ts) {
   const along = b.w >= b.d,
@@ -395,7 +353,7 @@ function pitchedSheet(m, b, ye, top, sheet, wall, trim, key, ts) {
   }
   // Ridge vent along the top.
   const c = P(0, 0, 0);
-  m.box('metal', c.x, ye + rise - 0.05, c.z, along ? L * 0.7 : 0.6, 0.35, along ? 0.6 : L * 0.7, surfaceTint('metal', 0x8a9296));
+  m.box('metal', c.x, ye + rise - 0.05, c.z, along ? L * 0.7 : 0.6, 0.35, along ? 0.6 : L * 0.7, surfaceTint('steel', 0x8a9296));
 }
 function smokestack(m, b) {
   const c = chimneyOf(b);
@@ -407,11 +365,11 @@ function smokestack(m, b) {
   m.cylinder('concrete', c.x, c.top - 0.02, c.z, c.r - 0.05, 0.02, 14, grey(0.02));
 }
 export function buildRoof(m, b) {
-  const rnd = seededRandom(0x51f15e + b.id * 977),
-    style = roofStyle(b);
-  if (style === 'gable' || style === 'hip') pitched(m, b, rnd, style === 'hip');
-  else if (style === 'shed' || style === 'saw') industrial(m, b, rnd, style === 'saw');
-  else flat(m, b, rnd);
+  const plan = roofPlan(b),
+    style = plan.style;
+  if (style === 'gable' || style === 'hip') pitched(m, b, plan, style === 'hip');
+  else if (style === 'shed' || style === 'saw') industrial(m, b, style === 'saw');
+  else flat(m, b, plan);
   smokestack(m, b);
 }
 function toMeshes(mesher, offset = null) {

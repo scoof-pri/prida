@@ -5,18 +5,15 @@
 import { Arena } from './simulation.js';
 import { appearance } from './cosmetics.js';
 import { decodeLoadout } from './items.js';
+import { NetFeed, compact } from './netcode.js';
 
 export const ROOM_MODES = {
   'royale-city': { mode: 'royale', size: 'city', humans: 10, label: 'Big City Royale' },
   royale: { mode: 'royale', size: 'district', humans: 10, label: 'Mini Royale' },
   duel: { mode: 'duel', size: 'district', humans: 2, label: 'Duel · 1 v 1' },
+  'duel-city': { mode: 'duel', size: 'city', humans: 2, label: 'Duel · Big City' },
   classic: { mode: 'classic', size: 'district', humans: 10, label: 'Arena' },
 };
-const PRECISE = new Set(['angle', 'pitch']);
-function compact(key, v) {
-  if (typeof v !== 'number' || Number.isInteger(v)) return v;
-  return PRECISE.has(key) ? Math.round(v * 1000) / 1000 : Math.round(v * 100) / 100;
-}
 const newId = () => (crypto.randomUUID ? crypto.randomUUID() : 'p' + Math.random().toString(36).slice(2) + Date.now().toString(36));
 
 export class Room {
@@ -28,6 +25,7 @@ export class Room {
     this.host = null;
     this.match = 0;
     this.clients = new Map(); // id -> { send(text) }
+    this.feed = new NetFeed();
     this.sim = this.lobbySim();
     this.tick = 0;
     this.acc = 0;
@@ -60,8 +58,13 @@ export class Room {
       bots: spec.mode === 'duel' ? 0 : Math.max(0, contenders - this.clients.size),
     };
   }
-  send(conn, message) {
-    conn.send(typeof message === 'string' ? message : JSON.stringify(message, compact));
+  // Returns whether it went out (a connection may say no by returning false).
+  send(conn, message, reliable = true) {
+    try {
+      return conn.send(typeof message === 'string' ? message : JSON.stringify(message, compact), reliable) !== false;
+    } catch {
+      return false;
+    }
   }
   // Returns an error text, or the new member's id.
   join(conn, params = {}) {
@@ -75,12 +78,14 @@ export class Room {
     p.cosmetics = appearance(params.cos || {});
     this.sim.setLoadout(p, decodeLoadout(params.loadout));
     this.sim.setSkills(p, String(params.skills || '').slice(0, 16));
-    this.send(conn, { type: 'welcome', id, state: this.sim.snapshot(), group: this.group() });
+    this.feed.forget(id);
+    this.broadcast(id, 'welcome');
     this.broadcast();
     return { id };
   }
   leave(id) {
     if (!this.clients.delete(id)) return;
+    this.feed.forget(id);
     if (this.host === id) this.host = this.clients.keys().next().value || null;
     const p = this.sim.players.find((p) => p.id === id);
     if (this.phase === 'playing' && p) {
@@ -116,6 +121,7 @@ export class Room {
     const humans = [...this.clients.keys()].map((id) => this.sim.players.find((p) => p.id === id)).filter(Boolean),
       spec = this.spec;
     this.sim.dispose();
+    this.feed.reset();
     this.sim = start ? new Arena({ seed: this.seed, mode: spec.mode, size: spec.size, bus: spec.mode === 'royale' }) : this.lobbySim();
     for (const old of humans) {
       const p = this.sim.addPlayer(old.id, old.name);
@@ -129,27 +135,20 @@ export class Room {
       for (let n = humans.length; n < total; n++) this.sim.addPlayer('bot' + n, 'BOT ' + (n + 1), true);
       this.phase = 'playing';
     } else this.phase = 'lobby';
-    this.lastJson = {};
     this.broadcast();
   }
-  // Same packet format as the server: shared state, own inventory in `self`, chests / destruction only on change.
-  broadcast() {
-    const state = this.sim.snapshot(),
-      tick = (this.netTick = (this.netTick || 0) + 1),
-      slots = new Map();
-    this.lastJson ||= {};
-    for (const key of ['chests', 'destruction']) {
-      const json = JSON.stringify(state[key], compact);
-      if (json === this.lastJson[key] && tick % 30) delete state[key];
-      else this.lastJson[key] = json;
+  // Same packets as the server (netcode.js): the shared state once, each member's inventory, input
+  // acknowledgement and missing chests / destruction on top.
+  broadcast(only = null, type = 'state') {
+    const f = this.feed.frame(this.sim.snapshot(), { phase: this.phase }),
+      extra = { type, events: only ? [] : this.sim.drainEvents() },
+      sticky = { group: this.group() },
+      acks = new Map(this.sim.players.map((p) => [p.id, p.ack || 0]));
+    for (const [id, conn] of this.clients) {
+      if (only && id !== only) continue;
+      const pk = this.feed.packet(id, f, { ack: acks.get(id) || 0 }, type === 'welcome' ? { ...extra, id } : extra, sticky);
+      if (this.send(conn, pk.text, pk.reliable)) pk.commit();
     }
-    for (const p of state.players) {
-      slots.set(p.id, p.slots);
-      delete p.slots;
-      if (this.phase === 'playing') delete p.loadout;
-    }
-    const base = JSON.stringify({ type: 'state', state, events: this.sim.drainEvents(), group: this.group() }, compact).slice(0, -1);
-    for (const [id, conn] of this.clients) this.send(conn, base + ',"self":' + JSON.stringify({ slots: slots.get(id) || null }, compact) + '}');
   }
   // 60 simulation steps and 30 states a second, on the host's computer.
   update() {

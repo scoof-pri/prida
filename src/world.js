@@ -1,5 +1,5 @@
 import { BUILDING_TYPES, WEAPONS } from './catalog.js';
-import { rollChest } from './items.js';
+import { rollChest, LOOT_WEAPONS } from './items.js';
 import { ObstacleGrid, isLowSolid } from './spatial.js';
 import { streets, DECOR_INFO, rotatedSize } from './decor-layout.js';
 import { rawHeight } from './terrain.js';
@@ -24,6 +24,111 @@ export function stairLane(b, storey) {
     za = z0 + dir * STAIR.run * 2,
     zb = z0 + dir * (len + 0.2);
   return { x, z0, dir, holeZ0: Math.min(za, zb), holeZ1: Math.max(za, zb) };
+}
+// Roof of a building: pitched on homes, sheds and saw-tooth on some industry, flat (with a parapet) elsewhere.
+export function roofStyle(b) {
+  if (b.category === 'home') return Math.abs(b.w - b.d) < 3.5 && (b.id + b.w) % 3 === 0 ? 'hip' : 'gable';
+  if (b.category === 'industry') return ['warehouse', 'hangar'].includes(b.type) ? 'shed' : ['factory', 'workshop'].includes(b.type) ? 'saw' : 'flat';
+  return 'flat';
+}
+// Height you stand on when on the roof (the top of the collision box above the last storey).
+export const roofTop = (b) => (b.height - b.roofBase > 0.3 ? b.height : b.roofBase);
+// Smokestack of the big industrial buildings (the chimney smoke rises from its top).
+export function chimneyOf(b) {
+  if (b.category !== 'industry' || b.height < 9) return null;
+  return { x: b.x + b.w * 0.25, z: b.z - b.d * 0.2, base: b.roofBase, top: roofTop(b) + 6 + (b.id % 3) * 1.5, r: 0.85 };
+}
+// What stands on a roof (0.28): the parapet, stair housing, air-conditioning units, water tanks, skylights, antennas
+// and vents of flat roofs, the chimney through a pitched roof, the smokestack of big works. One plan per building,
+// from its own random stream: roofs.js draws it and createWorld gives every piece a collision box (roofPlantBoxes),
+// so it is the same on every client and on the server.
+export function roofPlan(b) {
+  const rnd = seededRandom(0x51f15e + b.id * 977),
+    style = roofStyle(b),
+    plan = { style, items: [], stack: chimneyOf(b) };
+  if (style === 'gable' || style === 'hip') {
+    plan.shade = 0.82 + rnd() * 0.22;
+    if (rnd() < 0.85) {
+      const along = b.w >= b.d,
+        L = along ? b.w : b.d,
+        S = along ? b.d : b.w,
+        run = S / 2 + 0.45,
+        u = (rnd() - 0.5) * L * 0.5,
+        v = (rnd() < 0.5 ? -1 : 1) * run * 0.35,
+        ye = b.roofBase - 0.02,
+        yr = Math.max(b.height, ye + 1.2);
+      plan.chimney = { x: along ? b.x + u : b.x + v, z: along ? b.z + v : b.z + u, base: ye, top: yr + 0.7 };
+    }
+    return plan;
+  }
+  if (style !== 'flat') return plan;
+  plan.gravel = 0.9 + rnd() * 0.2;
+  const w = b.w,
+    d = b.d,
+    free = [],
+    step = 3.2;
+  for (let x = -w / 2 + 2.2; x <= w / 2 - 2.2; x += step)
+    for (let z = -d / 2 + 2.2; z <= d / 2 - 2.2; z += step) free.push([b.x + x, b.z + z]);
+  for (let i = free.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [free[i], free[j]] = [free[j], free[i]];
+  }
+  const stack = plan.stack,
+    take = () => {
+      while (free.length) {
+        const s = free.pop();
+        // Clear of the smokestack and of a roof chest.
+        if ((!stack || Math.hypot(s[0] - stack.x, s[1] - stack.z) > 3) && (!b.roofChest || Math.hypot(s[0] - b.roofChest.x, s[1] - b.roofChest.z) > 2.6)) return s;
+      }
+      return null;
+    };
+  // Stair and lift housing on taller buildings.
+  if ((b.storeys || 0) >= 3) {
+    const s = take();
+    if (s) plan.items.push({ kind: 'housing', x: s[0], z: s[1] });
+  }
+  const units = 1 + Math.floor(rnd() * 3 + Math.min(3, (w * d) / 160));
+  for (let i = 0; i < units; i++) {
+    const s = take();
+    if (!s) break;
+    const kind = rnd();
+    if (kind < 0.55) plan.items.push({ kind: 'ac', x: s[0], z: s[1], rot: rnd() < 0.5 });
+    else if (kind < 0.75) plan.items.push({ kind: 'tank', x: s[0], z: s[1] });
+    else if (kind < 0.9) plan.items.push({ kind: 'skylight', x: s[0], z: s[1] });
+    else plan.items.push({ kind: 'antenna', x: s[0], z: s[1] });
+  }
+  for (let i = 0; i < 3; i++) {
+    const s = take();
+    if (!s) break;
+    plan.items.push({ kind: 'vent', x: s[0] + (rnd() - 0.5), z: s[1] + (rnd() - 0.5), h: 0.7 + rnd() * 0.6 });
+  }
+  return plan;
+}
+// Parapet height and wall thickness of a flat roof (coping included in the height).
+export const PARAPET = { h: 0.93, t: 0.37 };
+// Collision boxes of a roof plan: {x, y (centre), z, w, h, d}.
+export function roofPlantBoxes(b, plan = roofPlan(b)) {
+  const out = [],
+    box = (x, y0, z, w, h, d) => out.push({ x, y: y0 + h / 2, z, w, h, d });
+  if (plan.style === 'flat') {
+    const deck = roofTop(b),
+      { h, t } = PARAPET;
+    box(b.x, deck, b.z + b.d / 2 - t / 2 + 0.06, b.w + 0.12, h, t);
+    box(b.x, deck, b.z - b.d / 2 + t / 2 - 0.06, b.w + 0.12, h, t);
+    box(b.x + b.w / 2 - t / 2 + 0.06, deck, b.z, t, h, b.d - 2 * t + 0.24);
+    box(b.x - b.w / 2 + t / 2 - 0.06, deck, b.z, t, h, b.d - 2 * t + 0.24);
+    for (const it of plan.items) {
+      if (it.kind === 'housing') box(it.x, deck, it.z, 2.8, 2.9, 3.2);
+      else if (it.kind === 'ac') box(it.x, deck, it.z, it.rot ? 1.4 : 2.0, 1.16, it.rot ? 2.0 : 1.4);
+      else if (it.kind === 'tank') box(it.x, deck, it.z, 2.3, 3.1, 2.3);
+      else if (it.kind === 'skylight') box(it.x, deck, it.z, 1.8, 0.65, 2.4);
+      else if (it.kind === 'antenna') box(it.x, deck, it.z, 0.16, 4.2, 0.16);
+      else if (it.kind === 'vent') box(it.x, deck, it.z, 0.26, it.h, 0.26);
+    }
+  }
+  if (plan.chimney) box(plan.chimney.x, plan.chimney.base, plan.chimney.z, 0.86, plan.chimney.top + 0.1 - plan.chimney.base, 0.86);
+  if (plan.stack) box(plan.stack.x, plan.stack.base, plan.stack.z, (plan.stack.r + 0.12) * 2, plan.stack.top - plan.stack.base, (plan.stack.r + 0.12) * 2);
+  return out;
 }
 export function seededRandom(seed) {
   let n = seed >>> 0;
@@ -461,7 +566,8 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     // Walkway from door to door stays clear of furniture.
     keepOut.push({ x: b.x, z: b.z, w: b.door + 1.6, d: d + 5 });
     spawns.push([b.x, b.z]);
-    chests.push({ id: 'chest' + b.id, x: b.x + 1.9, y: 0, z: b.z + d / 2 - 1.3, tier: 'chest', opened: false });
+    // Where a chest may stand by the door (0.27: not every building gets one, see below).
+    b.chestSpot = { x: b.x + 1.9, z: b.z + d / 2 - 1.3 };
   }
   const addProp = (x, z, w, h, d, part, color) => {
     const ground = groundHeight(x, z, map),
@@ -472,6 +578,7 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
   for (const p of parks) if (BIOME_TYPES.includes(p.type)) wild(map, p, rand, addProp);
   for (const p of parks) {
     if (BIOME_TYPES.includes(p.type)) continue;
+    if (PARK_LAIRS[p.type] && !map.lairs.some((l) => l.biome === p.type)) map.lairs.push(parkLair(p));
     // Hills stay inside their lot, clear of paths, benches and the pond, so flat features never float.
     if (p.type === 'park')
       hills.push(
@@ -565,17 +672,31 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     const o = obstacles.find((q) => q.part === 'tree' && q.x === t[0] && q.z === t[1]);
     if (o) o.tree = i;
   });
-  // Supply crates down the central avenue.
-  const supplies = Math.max(7, Math.round((R * 26) / 22));
+  // Chests (0.27): fewer of them, in more kinds of places, in visible rarity tiers. About half the buildings keep a
+  // chest by the door (tier 'chest'); flat roofs of big buildings carry roof chests (tier 'roof', better odds) and
+  // the tallest roofs a legendary one, worth the jetpack or a glide from the bus. Own random stream: the layout
+  // never shifts.
+  const chestRand = seededRandom(seed ^ 0x27d4eb2d),
+    roofy = buildings
+      .filter((b) => b.chestSpot && roofStyle(b) === 'flat' && (b.storeys || 0) >= 1 && b.w >= 8 && b.d >= 8)
+      .sort((a, c) => c.height - a.height || a.id - c.id),
+    legendary = new Set(roofy.slice(0, size === 'city' ? 5 : 2).map((b) => b.id));
+  for (const b of buildings) {
+    if (!b.chestSpot) continue;
+    const roll = chestRand();
+    if (legendary.has(b.id) || (roofy.includes(b) && roll < 0.2)) {
+      b.roofChest = { x: b.x - b.w * 0.18, z: b.z + b.d / 2 - 1.7 };
+      chests.push({ id: 'roof' + b.id, ...b.roofChest, y: roofTop(b), high: true, tier: legendary.has(b.id) ? 'legendary' : 'roof', opened: false });
+    } else if (roll < 0.62) chests.push({ id: 'chest' + b.id, ...b.chestSpot, tier: 'chest', opened: false });
+  }
+  // Supply crates down the central avenue: half as many as before.
+  const supplies = Math.max(4, Math.round((R * 26) / 44));
   for (let n = 0; n < supplies; n++)
-    chests.push({ id: 'supply' + n, x: 0, z: (n - (supplies - 1) / 2) * 22 + 7, tier: 'supply', opened: false });
-  for (const c of chests) c.y = groundHeight(c.x, c.z, map);
+    chests.push({ id: 'supply' + n, x: 0, z: (n - (supplies - 1) / 2) * 44 + 7, tier: 'supply', opened: false });
+  for (const c of chests) if (!c.high) c.y = groundHeight(c.x, c.z, map);
   // Loot uses its own stream so contents never shift the district layout. Every weapon type appears at least once.
   const lootRand = seededRandom(seed ^ 0x5bd1e995),
-    weaponDeck = shuffle(
-      WEAPONS.map((w, i) => i),
-      lootRand,
-    ),
+    weaponDeck = shuffle([...LOOT_WEAPONS], lootRand),
     order = shuffle(
       chests.map((c, i) => i),
       lootRand,
@@ -589,6 +710,11 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     for (let z = -map.limit.z; z <= map.limit.z; z += 2) top = Math.max(top, rawHeight(x, z, map));
   map.maxTerrainHeight = top + 0.1;
   placeDecor(map, keepOut, seededRandom(seed ^ 0x2545f491), levelKeepOut);
+  // Everything on the roofs is solid (0.28): parapets, plant, chimneys and smokestacks stop players, bullets and the
+  // camera. They go with the roof when it is blown off or the building comes down.
+  for (const b of buildings)
+    for (const r of roofPlantBoxes(b))
+      obstacles.push({ ...r, part: 'roofplant', building: b.id, storey: (b.storeys || 0) + 1, color: 0x9aa0a4 });
   for (const p of plots) delete p.kind;
   map.obstacles.grid = new ObstacleGrid(map.obstacles, map.limit);
   map.obstacles.lowGrid = new ObstacleGrid(map.obstacles.filter(isLowSolid), map.limit, 8, '_lowStamp');
@@ -603,11 +729,18 @@ export const BIOME_LOTS = [
 ];
 export const BIOME_TYPES = BIOME_LOTS.map((b) => b[0]);
 // Which boss guards which biome (first biome set only).
-export const LAIRS = { forest: 'might', desert: 'fire', glade: 'mind', meadow: 'chaos', lake: 'void' };
+export const LAIRS = { desert: 'fire', lake: 'void' };
+// And which park (the first of each kind): the brood mother in
+// the south of the grove, the wyrm in the quarry pit. Players never spawn next to a living boss (Arena.spawn).
+export const PARK_LAIRS = { grove: 'brood', quarry: 'wyrm' };
+export function parkLair(p) {
+  const at = p.type === 'hill' ? { x: p.x + 9, z: p.z } : p.type === 'quarry' ? { x: p.x - 11, z: p.z } : { x: p.x, z: p.z - p.d * 0.22 };
+  return { boss: PARK_LAIRS[p.type], biome: p.type, ...at, lot: { x: p.x, z: p.z, w: p.w, d: p.d } };
+}
 function wild(map, p, rand, addProp) {
   const { hills, trees, rocks, spawns, chests, waters, flora } = map,
     first = !map.lairs.some((l) => l.biome === p.type),
-    lair = first && LAIRS[p.type] ? { boss: LAIRS[p.type], biome: p.type, x: p.x, z: p.z } : null;
+    lair = first && LAIRS[p.type] ? { boss: LAIRS[p.type], biome: p.type, x: p.x, z: p.z, lot: { x: p.x, z: p.z, w: p.w, d: p.d } } : null;
   // Lots on the big map are larger than the district's: counts scale with area, rings with size.
   const base = BIOME_LOTS.find((b) => b[0] === p.type) || [p.type, 2, 2],
     f = (p.w * p.d) / (base[1] * 24 * base[2] * 26),
@@ -749,7 +882,8 @@ function wild(map, p, rand, addProp) {
     tree(p.x + p.w * 0.35, p.z - p.d * 0.25, 'broad');
   }
   spawns.push([p.x + p.w * 0.3, p.z + p.d * 0.3]);
-  chests.push({ id: 'wild' + p.id, x: p.x - p.w * 0.3, z: p.z - p.d * 0.3, tier: 'park', opened: false });
+  // About half the wild plots hide a chest (0.27: fewer chests); chosen by plot id, so the layout stream is untouched.
+  if (((p.id * 2654435761) >>> 0) % 2 === 0) chests.push({ id: 'wild' + p.id, x: p.x - p.w * 0.3, z: p.z - p.d * 0.3, tier: 'park', opened: false });
 }
 // Models, furniture and street furniture. Every item with hit points becomes an obstacle linked to its decor entry:
 // solid ones block movement, small ones (`nocollide`: chairs, lamps, monitors…) only stop bullets and break.

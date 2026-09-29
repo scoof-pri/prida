@@ -15,3 +15,10 @@ services:
         value: "22"
       - key: PRIDA_MAX_ROOMS
         value: "6"
+      # Accounts (0.23). Without these the server keeps accounts in a file that a free service loses on every
+      # restart and deploy. A free Upstash Redis database (upstash.com, no card) keeps them: create one, open its
+      # REST API tab and paste the two values in the Render dashboard (Environment). Never commit them here.
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

@@ -8,6 +8,8 @@ import { Arena, initPhysics } from './src/simulation.js';
 import { appearance } from './src/cosmetics.js';
 import { roomCode } from './src/party.js';
 import { decodeLoadout } from './src/items.js';
+import { createAccounts, storeFromEnv } from './accounts.mjs';
+import { NetFeed, compact } from './src/netcode.js';
 await initPhysics();
 const MAX_ROOMS = Number(process.env.PRIDA_MAX_ROOMS) || 24;
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
@@ -19,16 +21,36 @@ const mime = {
   '.wasm': 'application/wasm',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  // The PBR textures and foliage cards: without these they went out as application/octet-stream (with nosniff).
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
   '.glb': 'model/gltf-binary',
   '.md': 'text/plain; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
 };
+// Hashed bundles never change; models, textures and icons change only with a release. Caching them spares the
+// free host's bandwidth and makes the second visit load in a moment.
+function cacheFor(pathname) {
+  if (pathname.startsWith('/assets/')) return 'public, max-age=31536000, immutable';
+  if (/^\/(models|textures|icons)\//.test(pathname)) return 'public, max-age=86400';
+  return 'no-cache';
+}
 const rooms = new Map();
+const origins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+// Accounts (accounts.mjs): an Upstash Redis database when UPSTASH_REDIS_REST_URL/TOKEN are set, else a local file
+// (which a free Render service loses on every deploy and restart).
+const accounts = createAccounts({ store: storeFromEnv(process.env, path.dirname(fileURLToPath(import.meta.url))), origins });
 // Online modes. `royale-city` is the big city (≈ 8× the district) for up to 10 humans plus bots (24 contenders).
+// `duel-city` (0.28): a 1 v 1 inside a fixed ring in the middle of the big city. Duels simulate at 60 Hz and send
+// 30 states a second (two players cost next to nothing), so shots and movement feel right at up to 100 ms ping.
 const MODES = {
-  'royale-city': { mode: 'royale', size: 'city', humans: 10, label: 'Big City Royale' },
-  royale: { mode: 'royale', size: 'district', humans: 10, label: 'Mini Royale' },
-  duel: { mode: 'duel', size: 'district', humans: 2, label: 'Duel · 1 v 1' },
-  classic: { mode: 'classic', size: 'district', humans: 10, label: 'Arena' },
+  'royale-city': { mode: 'royale', size: 'city', humans: 10, label: 'Big City Royale', hz: 30, sendEvery: 4 },
+  royale: { mode: 'royale', size: 'district', humans: 10, label: 'Mini Royale', hz: 30, sendEvery: 3 },
+  duel: { mode: 'duel', size: 'district', humans: 2, label: 'Duel · 1 v 1', hz: 60, sendEvery: 2 },
+  'duel-city': { mode: 'duel', size: 'city', humans: 2, label: 'Duel · Big City', hz: 60, sendEvery: 2 },
+  classic: { mode: 'classic', size: 'district', humans: 10, label: 'Arena', hz: 30, sendEvery: 3 },
 };
 const modeKey = (v) => (MODES[v] ? v : 'royale');
 // Public matchmaking: a queue room starts by itself (duel: two players; royale: 20 s after the second player
@@ -43,6 +65,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ multiplayerUrl: 'auto', room: 'park' }));
       return;
     }
+    if (await accounts.handle(req, res, pathname)) return;
     if (pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
       const m = process.memoryUsage();
@@ -59,6 +82,7 @@ const server = http.createServer(async (req, res) => {
           heapMB: Math.round(m.heapUsed / 1e6),
           rssMB: Math.round(m.rss / 1e6),
           uptimeS: Math.round(process.uptime()),
+          accounts: accounts.store.kind,
         }),
       );
       stats.lagMax = stats.worstStep = 0;
@@ -72,7 +96,8 @@ const server = http.createServer(async (req, res) => {
     }
     const data = await readFile(file);
     res.writeHead(200, {
-      'content-type': mime[path.extname(file)] || 'application/octet-stream',
+      'content-type': mime[path.extname(file).toLowerCase()] || 'application/octet-stream',
+      'cache-control': cacheFor(pathname),
       'X-Content-Type-Options': 'nosniff',
     });
     res.end(data);
@@ -82,7 +107,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 const wss = new WebSocketServer({ server, maxPayload: 8192, perMessageDeflate: false });
-const origins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 function group(r) {
   const spec = MODES[r.kind];
   return r.party || r.queue
@@ -123,43 +147,35 @@ function newRoom(code, kind, { party = false, queue = false } = {}) {
     // The lobby only lists players: a small map is enough (the match builds the real one).
     sim: new Arena({ seed, mode: spec.mode === 'duel' ? 'duel' : 'classic', size: 'district' }),
     clients: new Map(),
+    feed: new NetFeed(),
   };
 }
-// Numbers go out rounded (centimetres, milliradians): positions and angles need no more, and long decimals
-// were most of every packet.
-const PRECISE = new Set(['angle', 'pitch']);
-function compact(key, v) {
-  if (typeof v !== 'number' || Number.isInteger(v)) return v;
-  return PRECISE.has(key) ? Math.round(v * 1000) / 1000 : Math.round(v * 100) / 100;
-}
+// Numbers go out rounded (netcode.js compact: centimetres, milliradians). Returns whether it went out.
 function send(ws, message) {
   // A slow connection skips states instead of queueing them (a queue is what makes ping explode).
-  if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 48000) ws.send(typeof message === 'string' ? message : JSON.stringify(message, compact));
+  if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount >= 48000) return false;
+  ws.send(typeof message === 'string' ? message : JSON.stringify(message, compact));
+  return true;
 }
-// States are shared by the room except for each player's own inventory. Chests and destruction lists only go out
-// when they change (and every 2 s as a refresh); clients keep the last copy.
-function broadcast(r) {
-  const state = r.sim.snapshot(),
-    tick = (r.netTick = (r.netTick || 0) + 1),
-    refresh = tick % 40 === 0,
-    slots = new Map();
-  for (const key of ['chests', 'destruction']) {
-    const json = JSON.stringify(state[key], compact);
-    if (json === r['last_' + key] && !refresh) delete state[key];
-    else r['last_' + key] = json;
+// States (netcode.js): the shared part is built once; each connection gets its own inventory, the last input the
+// server applied for it (`ack`, for its prediction) and only the chests and destruction it has not been sent yet.
+// A state that could not be sent is not counted, so the next one carries the difference.
+function broadcast(r, only = null, type = 'state') {
+  const f = r.feed.frame(r.sim.snapshot(), { phase: r.phase }),
+    extra = { type, events: only ? [] : r.sim.drainEvents() },
+    sticky = { group: group(r) },
+    acks = new Map(r.sim.players.map((p) => [p.id, p.ack || 0]));
+  for (const [id, ws] of r.clients) {
+    if (only && id !== only) continue;
+    const pk = r.feed.packet(id, f, { ack: acks.get(id) || 0 }, type === 'welcome' ? { ...extra, id } : extra, sticky);
+    if (send(ws, pk.text)) pk.commit();
   }
-  for (const p of state.players) {
-    slots.set(p.id, p.slots);
-    delete p.slots;
-    if (r.phase === 'playing') delete p.loadout; // the lobby shows loadouts
-  }
-  const base = JSON.stringify({ type: 'state', state, events: r.sim.drainEvents(), group: group(r) }, compact).slice(0, -1);
-  for (const [id, ws] of r.clients) send(ws, base + ',"self":' + JSON.stringify({ slots: slots.get(id) || null }, compact) + '}');
 }
 function resetParty(r, start = false) {
   const humans = [...r.clients.keys()].map((id) => r.sim.players.find((p) => p.id === id)).filter(Boolean),
     spec = MODES[r.kind];
   r.sim.dispose();
+  r.feed.reset();
   r.startAt = 0;
   r.endedAt = 0;
   r.waitingSince = Date.now();
@@ -185,12 +201,23 @@ function resetParty(r, start = false) {
   broadcast(r);
 }
 wss.on('connection', (ws, req) => {
+  // First thing: a socket with no 'error' listener turns a bad frame (too big, malformed) into an uncaught
+  // exception that takes the whole server down, every room with it. That happened on the signalling sockets.
+  ws.on('error', () => {});
   if (origins.length && !origins.includes(req.headers.origin)) {
     ws.close(1008, 'Origin not allowed');
     return;
   }
-  const url = new URL(req.url, 'http://localhost');
+  // A malformed request target must not take the whole server (and every room on it) down.
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch {
+    ws.close(1008, 'Bad request');
+    return;
+  }
   if (url.searchParams.get('signal')) return signalling(ws, url);
+  if (url.searchParams.get('presence')) return presenceSocket(ws);
   const queueKind = url.searchParams.get('queue'),
     party = url.searchParams.get('party') === '1';
   let key, room;
@@ -241,7 +268,8 @@ wss.on('connection', (ws, req) => {
   player.cosmetics = appearance(url.searchParams.get('cos') || {});
   room.sim.setLoadout(player, decodeLoadout(url.searchParams.get('loadout')));
   room.sim.setSkills(player, url.searchParams.get('skills') || '');
-  send(ws, { type: 'welcome', id, state: room.sim.snapshot(), group: group(room) });
+  room.feed.forget(id);
+  broadcast(room, id, 'welcome');
   broadcast(room);
   if (room.queue) scheduleQueue(room);
   let rate = 240,
@@ -294,10 +322,10 @@ wss.on('connection', (ws, req) => {
       ws.close(1008, 'Invalid message');
     }
   });
-  ws.on('error', () => {});
   ws.on('close', (code, why) => {
     if (process.env.PRIDA_DEBUG) console.log('close', id, code, String(why));
     room.clients.delete(id);
+    room.feed.forget(id);
     if (!room.clients.size) {
       room.sim.dispose();
       rooms.delete(key);
@@ -319,6 +347,75 @@ wss.on('connection', (ws, req) => {
 // Direct play: the server only introduces browsers. A host registers its group code; guests with that code are
 // relayed to it until their WebRTC connection is up (offer / answer / network candidates, a few kilobytes).
 const hosts = new Map(); // code -> { ws, guests: Map<gid, ws> }
+// Friends (accounts.mjs): a signed-in lobby keeps one small socket open here, which tells it which of its friends
+// are online and carries group invites between friends.
+const presence = new Map(); // account name (lower case) → its open presence sockets
+function reportFriends(ws) {
+  send(ws, { type: 'friends', online: (ws.friends || []).filter((f) => presence.has(f.toLowerCase())) });
+}
+function reportAll() {
+  for (const set of presence.values()) for (const s of set) reportFriends(s);
+}
+// The session token comes in the first message, not in the address, so it never lands in request logs.
+function presenceSocket(ws) {
+  ws.alive = true;
+  ws.on('pong', () => (ws.alive = true));
+  const hello = setTimeout(() => ws.close(4003, 'Log in again'), 10000);
+  ws.once('message', async (raw) => {
+    clearTimeout(hello);
+    let token = '';
+    try {
+      token = String(JSON.parse(raw.toString()).token || '').slice(0, 80);
+    } catch {}
+    let name = null;
+    try {
+      name = token ? await accounts.sessionName(token) : null;
+    } catch {
+      return ws.close(1011, 'Accounts are unavailable. Try again later.');
+    }
+    if (!name) return ws.close(4003, 'Log in again');
+    if (ws.readyState !== WebSocket.OPEN) return;
+    online(ws, name);
+  });
+}
+function online(ws, name) {
+  const key = name.toLowerCase();
+  if (!presence.has(key)) presence.set(key, new Set());
+  const mine = presence.get(key);
+  // A few tabs or devices at once; the oldest goes when there are more.
+  if (mine.size >= 4) [...mine][0].close(4000, 'Opened elsewhere');
+  mine.add(ws);
+  ws.account = name;
+  const refresh = async () => {
+    ws.friends = (await accounts.readUser(name).catch(() => null))?.friends || [];
+    reportFriends(ws);
+  };
+  refresh().then(reportAll);
+  let budget = 30;
+  const refill = setInterval(() => (budget = Math.min(30, budget + 10)), 10000);
+  ws.on('message', async (raw) => {
+    ws.alive = true;
+    if (--budget < 0) return;
+    try {
+      const m = JSON.parse(raw.toString());
+      if (m.type === 'refresh') await refresh();
+      else if (m.type === 'invite' && typeof m.to === 'string' && (ws.friends || []).some((f) => f.toLowerCase() === m.to.toLowerCase())) {
+        const invite = { type: 'invite', from: name, party: roomCode(m.party), mode: modeKey(m.mode), direct: !!m.direct };
+        const targets = presence.get(m.to.toLowerCase());
+        if (!invite.party || !targets) return send(ws, { type: 'invite-failed', to: m.to });
+        for (const t of targets) send(t, invite);
+        send(ws, { type: 'invite-sent', to: m.to });
+      }
+    } catch {}
+  });
+  ws.on('close', () => {
+    clearInterval(refill);
+    const set = presence.get(key);
+    set?.delete(ws);
+    if (set && !set.size) presence.delete(key);
+    reportAll();
+  });
+}
 function signalling(ws, url) {
   const code = roomCode(url.searchParams.get('signal')),
     role = url.searchParams.get('role');
@@ -372,7 +469,8 @@ function scheduleQueue(r) {
   else r.startAt = r.waitingSince + QUEUE_WAIT.first * 1000;
 }
 // Rooms simulate at 30 Hz: free hosting gives a tenth of a CPU, and going over it stalls the whole server
-// (that is what turned into second-long pings). States go out at 20 Hz (15 on the big city).
+// (that is what turned into second-long pings). States go out at 20 Hz (15 on the big city). Duels (two players,
+// no bots) simulate at 60 Hz and send 30 states a second.
 const stats = { steps: 0, stepMs: 0, worstStep: 0, lagMax: 0, lagAvg: 0, since: Date.now() };
 let last = performance.now(),
   acc = 0,
@@ -385,19 +483,20 @@ setInterval(() => {
   acc += Math.min((now - last) / 1000, 0.1);
   last = now;
   while (acc >= 1 / 60) {
-    if (ticks % 2 === 0)
-      for (const r of rooms.values())
-        if (r.phase === 'playing') {
+    for (const r of rooms.values()) {
+      const hz = MODES[r.kind]?.hz || 30;
+      if (r.phase === 'playing' && (hz === 60 || ticks % 2 === 0)) {
           const t0 = performance.now();
-          r.sim.step(1 / 30);
+          r.sim.step(1 / hz);
           const ms = performance.now() - t0;
           stats.steps++;
           stats.stepMs += ms;
           stats.worstStep = Math.max(stats.worstStep, ms);
         }
+    }
     acc -= 1 / 60;
     ticks++;
-    for (const r of rooms.values()) if (ticks % (MODES[r.kind]?.size === 'city' ? 4 : 3) === 0) broadcast(r);
+    for (const r of rooms.values()) if (ticks % (MODES[r.kind]?.sendEvery || 3) === 0) broadcast(r);
   }
   // Matchmaking: start queue rooms on time; after a match, return everyone to the lobby for the next one.
   for (const r of rooms.values()) {
@@ -428,4 +527,8 @@ setInterval(() => {
   }
 }, Number(process.env.PRIDA_HEARTBEAT_MS) || 15000).unref();
 const port = Number(process.env.PORT) || 8080;
-server.listen(port, '0.0.0.0', () => console.log(`PRIDA ready at http://localhost:${port}`));
+server.listen(port, '0.0.0.0', () => {
+  console.log(`PRIDA ready at http://localhost:${port}`);
+  if (!accounts.store.persistent)
+    console.log('Accounts are kept in a local file: set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN to keep them across deploys.');
+});

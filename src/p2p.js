@@ -40,6 +40,8 @@ function signalURL(endpoint, code, role) {
 }
 // States go on the unreliable channel (a late state is useless); everything else must arrive.
 const isState = (text) => text.startsWith('{"type":"state"');
+// One-shot presses a guest repeats in its next two input packets, so a lost packet does not lose the press.
+const ONE_SHOT = ['jump', 'interact', 'heal', 'reload', 'dash', 'detonate', 'emote'];
 
 // ——— Host ———
 export function hostGroup({ endpoint, code, kind, params }) {
@@ -103,9 +105,12 @@ export function hostGroup({ endpoint, code, kind, params }) {
             }
             if (data.type === 'hello' && !peer.member) {
               const conn = {
-                  send: (text) => {
-                    const c = isState(text) && peer.channels.fast?.readyState === 'open' ? peer.channels.fast : peer.channels.rel;
-                    if (c?.readyState === 'open' && c.bufferedAmount < 262144) c.send(text);
+                  // States that carry chest or destruction changes (0.28 deltas) take the sure lane too.
+                  send: (text, reliable = true) => {
+                    const c = isState(text) && !reliable && peer.channels.fast?.readyState === 'open' ? peer.channels.fast : peer.channels.rel;
+                    if (c?.readyState !== 'open' || c.bufferedAmount >= 262144) return false;
+                    c.send(text);
+                    return true;
                   },
                 },
                 res = room.join(conn, data);
@@ -176,8 +181,9 @@ export function joinGroup({ endpoint, code, params, timeout = 15000 }) {
       try {
         const m = JSON.parse(text),
           i = m.input;
-        for (const k of ['jump', 'interact', 'heal', 'reload']) if (lastInput?.[k] > 0) i[k] = true;
-        lastInput = Object.fromEntries(['jump', 'interact', 'heal', 'reload'].map((k) => [k, i[k] ? 2 : Math.max(0, (lastInput?.[k] || 0) - 1)]));
+        // (Dash, the C4 detonator and emotes too: the host sees each press once, however often it arrives.)
+        for (const k of ONE_SHOT) if (lastInput?.[k] > 0) i[k] = true;
+        lastInput = Object.fromEntries(ONE_SHOT.map((k) => [k, i[k] ? 2 : Math.max(0, (lastInput?.[k] || 0) - 1)]));
         fast.send(JSON.stringify(m));
       } catch {}
       return;

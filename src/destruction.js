@@ -96,7 +96,7 @@ export function collapseParts(map, b) {
   return map.obstacles.filter(
     (o) =>
       o.building === b.id &&
-      (o.panel !== undefined || ['lintel', 'roof', 'upper', 'furniture', 'partition', 'stair', 'glass'].includes(o.part)),
+      (o.panel !== undefined || ['lintel', 'roof', 'upper', 'roofplant', 'furniture', 'partition', 'stair', 'glass'].includes(o.part)),
   );
 }
 export function indexPanels(map) {
@@ -130,7 +130,7 @@ export function syncDestruction(map, state) {
   for (const id of state.roofs || [])
     if (!map.appliedRoofs.has(id)) {
       map.appliedRoofs.add(id);
-      for (const o of map.obstacles.filter((o) => o.building === id && o.part === 'upper')) removeObstacle(map, o);
+      for (const o of map.obstacles.filter((o) => o.building === id && (o.part === 'upper' || o.part === 'roofplant'))) removeObstacle(map, o);
       changed.roofs.push(id);
     }
   const byPanel = (id) => map.obstacles.find((o) => o.panel === id),

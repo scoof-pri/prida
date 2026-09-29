@@ -1,39 +1,89 @@
-// Bosses and their relics. Bosses guard lairs in the wild biomes (see world.js LAIRS); each drops a relic
-// with special abilities when defeated:
-//   VIS · STRENGTH COLOSSUS (forest) → TITAN GLOVES: every melee hit is a one-shot kill, plus a ground quake
-//   IGNIS · FIRE GOLEM (desert)      → EMBER CORE: ring of fire around you, summon two helper bots
-//   NOEMA · MIND ORACLE (glade)      → MIND CROWN: replace an enemy's sight with a flashback of their own past
-//   ENTROPIA · CHAOS HERALD (meadow) → CHAOS SHARD: once a match, blow up half the map; or a line of ruin ahead
-//   NULL · VOID WARDEN (lake)        → VOID PORTAL GUN: a blue and an orange portal, like Portal
-// The simulation owns all of it (authoritative online); clients only draw the snapshot.
+// Bosses and their relics. Four bosses guard lairs in the desert, the lake, the grove and the quarry (see world.js
+// LAIRS and PARK_LAIRS); each drops a relic with special abilities when defeated. It goes into the inventory (0.27:
+// it has its own slot, shown with the weapons) and drops when its owner falls. VIS, NOEMA, ENTROPIA and GELU and
+// their relics were retired in 0.27:
+//   IGNIS · FIRE GOLEM (desert)       → EMBER CORE: ring of fire around you, summon two helper bots
+//   NULL · VOID WARDEN (lake)         → VOID PORTAL GUN: a blue and an orange portal, like Portal
+//   ARACHNE · BROOD MOTHER (grove)    → VENOM FANG: a pool of venom where you aim, and a pounce
+//   TERRA · QUARRY WYRM (quarry)      → EARTH SPINE: a line of stone spikes erupting ahead
+// Every boss fights with a move set (MOVES): a melee blow, a ranged attack and two signature moves, each with its
+// own wind-up, animation (the move id doubles as the animation name) and a telegraph on the ground where it will
+// land. The simulation owns all of it (authoritative online); clients only draw the snapshot and the events.
 import { groundHeight } from './terrain.js';
 import { castMap } from './raycast.js';
 import { rayBox, direction, EYE_HEIGHT } from './combat.js';
 import { lineClear } from './world.js';
 
 export const BOSSES = {
-  might: { name: 'VIS', title: 'STRENGTH COLOSSUS', hp: 2400, relic: 'gloves', speed: 2.8, color: 0xe0a33c },
   fire: { name: 'IGNIS', title: 'FIRE GOLEM', hp: 1800, relic: 'ember', speed: 3.1, color: 0xff6a2a },
-  mind: { name: 'NOEMA', title: 'MIND ORACLE', hp: 1400, relic: 'crown', speed: 2.6, float: 1.1, color: 0xb482ff },
-  chaos: { name: 'ENTROPIA', title: 'CHAOS HERALD', hp: 2000, relic: 'shard', speed: 3.2, float: 0.6, color: 0x38e0b0 },
   void: { name: 'NULL', title: 'VOID WARDEN', hp: 1600, relic: 'portal', speed: 3.4, color: 0x6a4cff },
+  // The brood mother is low and wide, the wyrm tall and thin: their hit boxes follow the bodies.
+  brood: { name: 'ARACHNE', title: 'BROOD MOTHER', hp: 1900, relic: 'fang', speed: 3.8, color: 0x9bd84a, height: 2.6, width: 3.2 },
+  wyrm: { name: 'TERRA', title: 'QUARRY WYRM', hp: 2200, relic: 'spine', speed: 3.2, color: 0xd08a3a, height: 4.2, width: 2 },
 };
+export const BOSS_HEIGHT = 3.4;
+export const BOSS_WIDTH = 1.6;
+export const bossHeight = (kind) => BOSSES[kind]?.height || BOSS_HEIGHT;
+export const bossWidth = (kind) => BOSSES[kind]?.width || BOSS_WIDTH;
+// Ranged attacks. `gravity` lobs the shot in an arc, `chill` freezes whoever it hits (half the value, in seconds),
+// `web` slows them, `homing` bends the shot toward its target.
 export const BOSS_SHOTS = {
-  might: { kind: 'boulder', speed: 17, damage: 26, radius: 3, every: 3, count: 1 },
   fire: { kind: 'fireball', speed: 19, damage: 22, radius: 2.6, every: 2.4, count: 1 },
-  mind: { kind: 'psy', speed: 15, damage: 16, radius: 0, every: 1.7, count: 1, homing: 1.4 },
-  chaos: { kind: 'entropy', speed: 22, damage: 18, radius: 2.2, every: 2, count: 2 },
   void: { kind: 'void', speed: 24, damage: 20, radius: 0, every: 2.1, count: 1 },
+  brood: { kind: 'web', speed: 19, damage: 10, radius: 0, every: 2.2, count: 1, web: 2.8 },
+  wyrm: { kind: 'rock', speed: 18, damage: 22, radius: 2.4, every: 2.6, count: 1, gravity: 9 },
+};
+// Shots that belong to a move rather than a boss's plain ranged attack.
+const EXTRA_SHOTS = {};
+const SHOT_SPECS = Object.fromEntries([...Object.values(BOSS_SHOTS), ...Object.values(EXTRA_SHOTS)].map((s) => [s.kind, s]));
+// Move sets. `at`: seconds from the start of the move to the moment it lands; `dur`: the whole move. Specials fire
+// when the target is between `min` and `max` metres away and their own cooldown `cd` has run out.
+export const MOVES = {
+  fire: {
+    melee: { id: 'swipe', at: 0.45, dur: 0.95, range: 3.8, arc: 3, damage: 26, push: 8 },
+    shot: { id: 'hurl', at: 0.45, dur: 0.9 },
+    specials: [
+      { id: 'ignite', min: 0, max: 12, cd: 11, at: 0.7, dur: 1.2 },
+      { id: 'meteor', min: 6, max: 28, cd: 13, at: 1.5, dur: 1.9 },
+    ],
+  },
+  void: {
+    melee: { id: 'claw', at: 0.4, dur: 0.85, range: 3.7, arc: 2.4, damage: 28, push: 7 },
+    shot: { id: 'point', at: 0.35, dur: 0.75 },
+    specials: [
+      { id: 'blink', min: 5, max: 22, cd: 8, at: 0.45, dur: 0.8 },
+      { id: 'well', min: 0, max: 18, cd: 13, at: 0.6, dur: 1.2 },
+    ],
+  },
+  brood: {
+    melee: { id: 'bite', at: 0.45, dur: 0.9, range: 4.3, arc: 2, damage: 28, push: 6 },
+    shot: { id: 'spit', at: 0.4, dur: 0.8 },
+    specials: [
+      { id: 'leap', min: 6, max: 20, cd: 9, at: 0.6, dur: 1.6 },
+      { id: 'venom', min: 0, max: 16, cd: 12, at: 0.6, dur: 1.1 },
+    ],
+  },
+  wyrm: {
+    melee: { id: 'bite', at: 0.5, dur: 1.0, range: 4.5, arc: 1.8, damage: 32, push: 8 },
+    shot: { id: 'spit', at: 0.45, dur: 0.9 },
+    specials: [
+      { id: 'burrow', min: 7, max: 26, cd: 12, at: 0.8, dur: 8 },
+      { id: 'sweep', min: 0, max: 6.5, cd: 9, at: 0.75, dur: 1.3 },
+    ],
+  },
+};
+// Names shown to players close by when a boss starts a signature move.
+export const MOVE_LABELS = {
+  ignite: 'RING OF FIRE',
+  meteor: 'METEOR SHOWER',
+  blink: 'BLINK',
+  well: 'GRAVITY WELL',
+  leap: 'POUNCE',
+  venom: 'VENOM POOL',
+  burrow: 'BURROW',
+  sweep: 'TAIL SWEEP',
 };
 export const RELICS = {
-  gloves: {
-    name: 'TITAN GLOVES',
-    boss: 'might',
-    color: 0xe0a33c,
-    // The gloves' real power is passive: any melee hit kills outright (see Arena.melee).
-    passive: 'ONE-SHOT MELEE',
-    abilities: [{ id: 'quake', label: 'QUAKE', cd: 14 }],
-  },
   ember: {
     name: 'EMBER CORE',
     boss: 'fire',
@@ -41,16 +91,6 @@ export const RELICS = {
     abilities: [
       { id: 'ring', label: 'RING OF FIRE', cd: 16 },
       { id: 'summon', label: 'HELPERS', cd: 40 },
-    ],
-  },
-  crown: { name: 'MIND CROWN', boss: 'mind', color: 0xb482ff, abilities: [{ id: 'flashback', label: 'FLASHBACK', cd: 24 }] },
-  shard: {
-    name: 'CHAOS SHARD',
-    boss: 'chaos',
-    color: 0x38e0b0,
-    abilities: [
-      { id: 'cataclysm', label: 'CATACLYSM · ONCE', cd: 1e9, once: true },
-      { id: 'rift', label: 'LINE OF RUIN', cd: 30 },
     ],
   },
   portal: {
@@ -62,12 +102,19 @@ export const RELICS = {
       { id: 'portalB', label: 'ORANGE PORTAL', cd: 0.5 },
     ],
   },
+  fang: {
+    name: 'VENOM FANG',
+    boss: 'brood',
+    color: 0x9bd84a,
+    abilities: [
+      { id: 'venom', label: 'VENOM POOL', cd: 18 },
+      { id: 'pounce', label: 'POUNCE', cd: 8 },
+    ],
+  },
+  spine: { name: 'EARTH SPINE', boss: 'wyrm', color: 0xd08a3a, abilities: [{ id: 'eruption', label: 'ERUPTION', cd: 16 }] },
 };
-export const BOSS_HEIGHT = 3.4;
-export const BOSS_WIDTH = 1.6;
 export const FLASHBACK_TIME = 5;
 export const HELPER_TIME = 25;
-const MELEE = { range: 3.4, damage: 28, every: 1.5 };
 const AGGRO = 26;
 const LEASH = 30;
 const hyp = Math.hypot;
@@ -76,15 +123,24 @@ export class BossSystem {
   constructor(arena) {
     this.a = arena;
     const scale = arena.mode === 'duel' ? 0.7 : arena.size === 'city' ? 1.25 : 1;
-    this.list = arena.map.lairs.map((l) => {
-      const park = arena.map.parks.find((p) => Math.abs(p.x - l.x) < 1 && Math.abs(p.z - l.z) < 1),
-        info = BOSSES[l.boss];
+    // A big-city duel (0.28) keeps only the bosses whose lair is inside its ring.
+    const ring = arena.zone?.fixed ? arena.zone : null;
+    this.list = arena.map.lairs.filter((l) => !ring || Math.hypot(l.x - ring.x, l.z - ring.z) < ring.radius + 10).map((l) => {
+      const lot = l.lot || arena.map.parks.find((p) => Math.abs(p.x - l.x) < 1 && Math.abs(p.z - l.z) < 1),
+        info = BOSSES[l.boss],
+        // The boss roams a box around its lair that stays inside the lot (2.5 m from the edges).
+        bounds = lot
+          ? {
+              x: Math.max(3, Math.min(lot.x + lot.w / 2 - 2.5 - l.x, l.x - (lot.x - lot.w / 2) - 2.5)),
+              z: Math.max(3, Math.min(lot.z + lot.d / 2 - 2.5 - l.z, l.z - (lot.z - lot.d / 2) - 2.5)),
+            }
+          : { x: 20, z: 20 };
       return {
         id: 'boss:' + l.boss,
         kind: l.boss,
         name: info.name + ' · ' + info.title,
         home: { x: l.x, z: l.z },
-        bounds: park ? { x: park.w / 2 - 2.5, z: park.d / 2 - 2.5 } : { x: 20, z: 20 },
+        bounds,
         maxHp: Math.round(info.hp * scale),
         hp: Math.round(info.hp * scale),
         x: l.x,
@@ -93,14 +149,19 @@ export class BossSystem {
         angle: 0,
         anim: 'idle',
         animTime: 0,
+        // Counts moves, so a client restarts an animation even when the same move follows itself.
+        seq: 0,
+        act: null,
         target: null,
         aggro: null,
-        cd: { melee: 0, shot: 2, special: 6, think: 0 },
+        cd: { melee: 0, shot: 2, special: 5, think: 0 },
         frozen: 0,
         confused: 0,
-        respawn: 0,
-        windup: 0,
+        // Set when it dies (90 s with respawns, never in a royale). A boss knocked to 0 by other means stays down.
+        respawn: Infinity,
         hitAt: -9,
+        under: false,
+        rage: false,
       };
     });
     this.shots = [];
@@ -109,23 +170,24 @@ export class BossSystem {
     this.portals = {};
     this.drops = [];
     this.dropId = 0;
-    // Blasts that go off later: a cataclysm and a line of ruin roll across the map instead of firing at once.
+    // Blasts and spikes that go off later: a cataclysm or a line of ruin rolls across the map instead of firing
+    // at once, and a boss's telegraphed attacks land when their warning runs out.
     this.pending = [];
   }
   get time() {
     return this.a.tick / 60;
   }
   alive() {
-    return this.list.filter((b) => b.hp > 0);
+    return this.list.filter((b) => b.hp > 0 && !b.under);
   }
-  // Nearest boss a ray hits before `range`.
+  // Nearest boss a ray hits before `range`. A burrowed wyrm is underground and cannot be hit.
   ray(origin, dir, range) {
     let best = null,
       distance = range;
     for (const b of this.list) {
-      if (b.hp <= 0) continue;
-      const h = BOSS_WIDTH / 2,
-        d = rayBox(origin, dir, { x: b.x - h, y: b.y, z: b.z - h }, { x: b.x + h, y: b.y + BOSS_HEIGHT, z: b.z + h }, distance);
+      if (b.hp <= 0 || b.under) continue;
+      const h = bossWidth(b.kind) / 2,
+        d = rayBox(origin, dir, { x: b.x - h, y: b.y, z: b.z - h }, { x: b.x + h, y: b.y + bossHeight(b.kind), z: b.z + h }, distance);
       if (d < distance) {
         distance = d;
         best = b;
@@ -134,16 +196,18 @@ export class BossSystem {
     return best ? { boss: best, distance } : null;
   }
   damage(b, amount, attacker = null) {
-    if (!b || b.hp <= 0 || amount <= 0) return;
+    if (!b || b.hp <= 0 || b.under || amount <= 0) return;
     // Bots chip bosses at half rate, like they hurt players.
     const dealt = Math.round(amount * (attacker?.bot ? 0.5 : 1) * (b.frozen > 0 ? 1.25 : 1));
     b.hp = Math.max(0, b.hp - dealt);
     b.hitAt = this.time;
     if (attacker && attacker.hp > 0) b.aggro = attacker.id;
-    this.a.events.push({ type: 'boss-hit', id: b.id, x: b.x, y: b.y + BOSS_HEIGHT * 0.6, z: b.z, amount: dealt });
+    this.a.events.push({ type: 'boss-hit', id: b.id, by: attacker?.id, x: b.x, y: b.y + bossHeight(b.kind) * 0.6, z: b.z, amount: dealt });
     if (b.hp === 0) {
+      b.act = null;
       b.anim = 'death';
       b.animTime = 0;
+      b.seq++;
       b.respawn = this.a.respawns ? 90 : Infinity;
       b.target = b.aggro = null;
       const credit = attacker?.helperOf ? this.a.players.find((p) => p.id === attacker.helperOf) || attacker : attacker;
@@ -157,8 +221,8 @@ export class BossSystem {
   }
   blast(x, y, z, radius, damage, owner) {
     for (const b of this.list) {
-      if (b.hp <= 0) continue;
-      const d = hyp(b.x - x, b.y + BOSS_HEIGHT / 2 - y, b.z - z) - BOSS_WIDTH / 2;
+      if (b.hp <= 0 || b.under) continue;
+      const d = hyp(b.x - x, b.y + bossHeight(b.kind) / 2 - y, b.z - z) - bossWidth(b.kind) / 2;
       if (d < radius) this.damage(b, damage * (1 - (Math.max(0, d) / radius) * 0.7), owner);
     }
   }
@@ -169,8 +233,34 @@ export class BossSystem {
       len = hyp(to.x, to.y, to.z) || 0.01;
     return castMap(from, { x: to.x / len, y: to.y / len, z: to.z / len }, len, this.a.map, null, true).distance >= len - 0.3;
   }
+  // Is a point open to a player (no wall in between)? Used by boss blasts, like Arena.blast.
+  open(x, y, z, p) {
+    const to = { x: p.x - x, y: p.y + 0.9 - y, z: p.z - z },
+      len = hyp(to.x, to.y, to.z) || 0.01;
+    return castMap({ x, y: y + 0.08, z }, { x: to.x / len, y: to.y / len, z: to.z / len }, len + 0.1, this.a.map, null, true).distance >= len - 0.1;
+  }
   hurt(p, amount, b) {
     this.a.damage(null, p, amount, b.id);
+  }
+  // A boss's own explosion: hurts players (credited to the boss), breaks props and walls, never hurts bosses.
+  bossBlast(b, x, y, z, radius, damage, cause = 'explosion', push = 0) {
+    const a = this.a;
+    for (const p of a.players) {
+      if (p.hp <= 0 || p.inBus) continue;
+      const d = hyp(p.x - x, p.y + 0.9 - y, p.z - z);
+      if (d > radius || !this.open(x, y, z, p)) continue;
+      this.hurt(p, Math.round(damage * (1 - (d / radius) * 0.6)), b);
+      if (push) this.knock(p, x, z, push * (1 - (d / radius) * 0.5), 4.5);
+    }
+    a.blast(x, y, z, radius, damage, null, cause, null, { players: false, bosses: false });
+  }
+  // Knock-back away from a point, with a hop.
+  knock(p, x, z, strength, up = 4.5) {
+    const dx = p.x - x,
+      dz = p.z - z,
+      d = hyp(dx, dz) || 1;
+    p.push = { x: (dx / d) * strength, z: (dz / d) * strength };
+    p.vy = Math.max(p.vy || 0, up);
   }
   step(dt) {
     const a = this.a;
@@ -180,6 +270,7 @@ export class BossSystem {
     this.stepPending(dt);
     for (const p of a.players) {
       if (p.frozen > 0) p.frozen = Math.max(0, p.frozen - dt);
+      if (p.webbed > 0) p.webbed = Math.max(0, p.webbed - dt);
       if (p.flashback > 0) p.flashback = Math.max(0, p.flashback - dt);
       if (p.portalCd > 0) p.portalCd = Math.max(0, p.portalCd - dt);
       if (p.relic) for (let i = 0; i < p.relic.cd.length; i++) p.relic.cd[i] = Math.max(0, p.relic.cd[i] - dt);
@@ -217,7 +308,10 @@ export class BossSystem {
     if (p.relic) this.drop(p.relic.id, p.x, p.z);
     p.relic = null;
     delete this.portals[p.id];
-    p.frozen = p.flashback = 0;
+    p.frozen = p.flashback = p.webbed = 0;
+  }
+  ground(b) {
+    return groundHeight(b.x, b.z, this.a.map) + (BOSSES[b.kind].float || 0);
   }
   stepBoss(b, dt) {
     const a = this.a,
@@ -226,8 +320,9 @@ export class BossSystem {
     if (b.hp <= 0) {
       b.respawn -= dt;
       if (b.respawn <= 0) {
-        Object.assign(b, { hp: b.maxHp, x: b.home.x, z: b.home.z, anim: 'idle', animTime: 0, aggro: null, target: null });
-        b.y = groundHeight(b.x, b.z, a.map) + (info.float || 0);
+        Object.assign(b, { hp: b.maxHp, x: b.home.x, z: b.home.z, anim: 'idle', animTime: 0, aggro: null, target: null, act: null, under: false, rage: false, respawn: Infinity });
+        b.seq++;
+        b.y = this.ground(b);
         a.events.push({ type: 'boss-spawn', id: b.id, x: b.x, y: b.y, z: b.z });
       }
       return;
@@ -235,25 +330,17 @@ export class BossSystem {
     for (const k in b.cd) b.cd[k] = Math.max(0, b.cd[k] - dt);
     b.frozen = Math.max(0, b.frozen - dt);
     b.confused = Math.max(0, b.confused - dt);
+    b.rage = b.hp < b.maxHp * 0.4;
     const slow = b.frozen > 0 ? 0.3 : 1;
-    // Strike landing after the wind-up.
-    if (b.windup > 0) {
-      b.windup -= dt * slow;
-      if (b.windup <= 0) {
-        for (const p of a.players)
-          if (p.hp > 0 && hyp(p.x - b.x, p.z - b.z) < MELEE.range + 0.4 && Math.abs(p.y - b.y) < 3) {
-            const d = hyp(p.x - b.x, p.z - b.z) || 1;
-            this.hurt(p, MELEE.damage, b);
-            p.push = { x: ((p.x - b.x) / d) * 9, z: ((p.z - b.z) / d) * 9 };
-            p.vy = Math.max(p.vy || 0, 4.5);
-          }
-        a.events.push({ type: 'boss-slam', id: b.id, kind: b.kind, x: b.x + Math.sin(b.angle) * 1.8, y: b.y, z: b.z + Math.cos(b.angle) * 1.8 });
-      }
+    // Stunned by a flashback: whatever it was doing is lost (a burrowed wyrm surfaces where it is).
+    if (b.confused > 0 && !b.under) {
+      if (b.act) this.endAct(b);
+      if (b.anim !== 'confused') this.setAnim(b, 'confused');
+      b.y = this.ground(b);
       return;
     }
-    if (b.anim !== 'idle' && b.anim !== 'walk' && b.animTime > 0.9) b.anim = 'idle';
-    if (b.confused > 0) {
-      b.anim = 'confused';
+    if (b.act) {
+      this.stepAct(b, dt * slow);
       return;
     }
     // Pick a target: whoever hurt it recently, else the nearest visible player near the lair.
@@ -275,110 +362,334 @@ export class BossSystem {
       if (hyp(b.home.x - b.x, b.home.z - b.z) > 1.5) goal = b.home;
       b.hp = Math.min(b.maxHp, b.hp + 30 * dt);
     } else {
-      const dist = hyp(t.x - b.x, t.z - b.z);
+      const moves = MOVES[b.kind],
+        dist = hyp(t.x - b.x, t.z - b.z);
       b.angle = turn(b.angle, Math.atan2(t.x - b.x, t.z - b.z), 3.5 * dt * slow);
-      if (dist > MELEE.range - 0.6) goal = t;
-      if (dist < MELEE.range && b.cd.melee <= 0 && Math.abs(t.y - b.y) < 3) {
-        b.cd.melee = MELEE.every;
-        b.windup = 0.45;
-        b.anim = 'attack';
-        b.animTime = 0;
+      if (dist > moves.melee.range - 0.6) goal = t;
+      if (dist < moves.melee.range && b.cd.melee <= 0 && Math.abs(t.y - b.y) < 3) {
+        b.cd.melee = 1.5;
+        this.start(b, moves.melee, { target: t.id, tx: t.x, tz: t.z, ty: t.y });
+        // A quick cone on the ground: where the blow will land.
+        this.tele(b, { shape: 'cone', x: b.x, z: b.z, r: moves.melee.range, arc: moves.melee.arc, angle: b.angle, time: moves.melee.at });
         return;
       }
-      if (b.cd.special <= 0 && this.special(b, t, dist)) return;
+      if (this.trySpecial(b, t, dist)) return;
       if (b.cd.shot <= 0 && dist > 4 && this.exposed(b, t)) {
         const s = BOSS_SHOTS[b.kind];
-        b.cd.shot = s.every * (b.hp < b.maxHp * 0.4 ? 0.7 : 1);
-        this.fire(b, t, s);
-        b.anim = 'cast';
-        b.animTime = 0;
+        b.cd.shot = s.every * (b.rage ? 0.7 : 1);
+        this.start(b, moves.shot, { target: t.id, tx: t.x, tz: t.z, ty: t.y });
+        return;
       }
     }
     if (goal) {
       const dx = goal.x - b.x,
         dz = goal.z - b.z,
         d = hyp(dx, dz) || 1,
-        v = info.speed * slow * (t ? 1 : 0.7) * dt;
+        v = info.speed * slow * (t ? (b.rage ? 1.15 : 1) : 0.7) * dt;
       b.x = clampTo(b.x + (dx / d) * v, b.home.x, b.bounds.x);
       b.z = clampTo(b.z + (dz / d) * v, b.home.z, b.bounds.z);
       if (!t) b.angle = turn(b.angle, Math.atan2(dx, dz), 3 * dt);
-      if (b.anim === 'idle') b.anim = 'walk';
-    } else if (b.anim === 'walk') b.anim = 'idle';
-    b.y = groundHeight(b.x, b.z, a.map) + (info.float || 0);
+      if (b.anim === 'idle') this.setAnim(b, 'walk');
+    } else if (b.anim === 'walk') this.setAnim(b, 'idle');
+    b.y = this.ground(b);
+  }
+  setAnim(b, name) {
+    b.anim = name;
+    b.animTime = 0;
+    b.seq++;
+  }
+  // Starts a move: its animation plays from now, and `perform` runs when it lands (`at`).
+  start(b, move, extra = {}) {
+    b.act = { id: move.id, t: 0, at: move.at, dur: move.dur, fired: false, move, ...extra };
+    this.setAnim(b, move.id);
+  }
+  endAct(b) {
+    if (b.under) this.surface(b, false);
+    b.act = null;
+    this.setAnim(b, 'idle');
+  }
+  // A telegraph: a glowing shape on the ground that fills up until the attack lands.
+  tele(b, shape) {
+    this.a.events.push({ type: 'boss-tele', id: b.id, kind: b.kind, ...shape });
+  }
+  trySpecial(b, t, dist) {
+    if (b.cd.special > 0) return false;
+    const ready = MOVES[b.kind].specials.filter(
+      (m) => (b.cd[m.id] || 0) <= 0 && dist >= m.min && dist <= m.max && (!m.sight || this.exposed(b, t)),
+    );
+    if (!ready.length) return false;
+    const m = ready[Math.floor(this.a.random() * ready.length) % ready.length];
+    b.cd[m.id] = m.cd * (b.rage ? 0.75 : 1);
+    b.cd.special = 3.2;
+    const act = { target: t.id, tx: t.x, tz: t.z, ty: t.y };
+    this.a.events.push({ type: 'boss-move', id: b.id, kind: b.kind, move: m.id, x: b.x, y: b.y, z: b.z });
+    const lair = (x, z) => ({ x: clampTo(x, b.home.x, b.bounds.x + 6), z: clampTo(z, b.home.z, b.bounds.z + 6) });
+    if (m.id === 'ignite') this.tele(b, { shape: 'ring', x: b.x, z: b.z, r: 6, time: m.at });
+    else if (m.id === 'meteor') {
+      const rand = this.a.random;
+      act.spots = [{ x: t.x, z: t.z }];
+      for (let i = 0; i < 2; i++) {
+        const ang = rand() * Math.PI * 2,
+          r = 3.5 + rand() * 3;
+        act.spots.push({ x: t.x + Math.sin(ang) * r, z: t.z + Math.cos(ang) * r });
+      }
+      for (const s of act.spots) this.tele(b, { shape: 'circle', x: s.x, z: s.z, r: 3.2, time: m.at, meteor: true });
+    } else if (m.id === 'well') {
+      const s = lair(t.x, t.z);
+      act.spot = s;
+      this.tele(b, { shape: 'circle', x: s.x, z: s.z, r: 5.5, time: m.at });
+    } else if (m.id === 'leap') {
+      // It lands inside its own ground (a spot outside would snap it back on the next step).
+      const s = { x: clampTo(t.x, b.home.x, b.bounds.x), z: clampTo(t.z, b.home.z, b.bounds.z) };
+      act.spot = s;
+      this.tele(b, { shape: 'circle', x: s.x, z: s.z, r: 3.6, time: m.at + 0.6 });
+    } else if (m.id === 'venom') {
+      act.spot = { x: t.x, z: t.z };
+      this.tele(b, { shape: 'circle', x: t.x, z: t.z, r: 4, time: m.at });
+    } else if (m.id === 'burrow') {
+      const s = { x: clampTo(t.x, b.home.x, b.bounds.x), z: clampTo(t.z, b.home.z, b.bounds.z) };
+      act.spot = s;
+      act.phase = 'dig';
+      const travel = Math.max(0.5, Math.min(2.4, hyp(s.x - b.x, s.z - b.z) / 10));
+      this.tele(b, { shape: 'circle', x: s.x, z: s.z, r: 3.6, time: m.at + travel + 0.55 });
+    } else if (m.id === 'sweep') this.tele(b, { shape: 'circle', x: b.x, z: b.z, r: 6.5, time: m.at });
+    this.start(b, m, act);
+    return true;
+  }
+  stepAct(b, dt) {
+    const act = b.act,
+      m = act.move;
+    act.t += dt;
+    const t = this.a.players.find((p) => p.id === act.target && p.hp > 0);
+    // Until the blow lands, keep tracking the target a little (the telegraph already shows where it goes).
+    if (!act.fired && t) {
+      act.tx = t.x;
+      act.tz = t.z;
+      act.ty = t.y;
+      b.angle = turn(b.angle, Math.atan2(t.x - b.x, t.z - b.z), 1.6 * dt);
+    }
+    if (!act.fired && act.t >= act.at) {
+      act.fired = true;
+      this.perform(b, act, t);
+    }
+    // Moves that travel: the brood mother in the air, the wyrm under the ground.
+    if (act.leap) this.stepLeap(b, act, dt);
+    if (act.phase && act.phase !== 'dig') this.stepBurrow(b, act, dt);
+    if (!act.leap) b.y = this.ground(b);
+    if (act.t >= act.dur && !act.leap && (!act.phase || act.phase === 'done')) {
+      b.act = null;
+      this.setAnim(b, 'idle');
+    }
+  }
+  perform(b, act, t) {
+    const a = this.a,
+      moves = MOVES[b.kind],
+      m = act.move;
+    if (m === moves.melee) {
+      // The blow: everyone in the arc in front of the boss, in reach, not behind a wall.
+      for (const p of a.players) {
+        if (p.hp <= 0 || p.inBus) continue;
+        const dx = p.x - b.x,
+          dz = p.z - b.z,
+          d = hyp(dx, dz);
+        if (d > m.range + 0.4 || Math.abs(p.y - b.y) > 3) continue;
+        const off = Math.abs(Math.atan2(Math.sin(Math.atan2(dx, dz) - b.angle), Math.cos(Math.atan2(dx, dz) - b.angle)));
+        if (d > 1.3 && off > m.arc / 2) continue;
+        if (!this.exposed(b, p, 1.2)) continue;
+        this.hurt(p, m.damage, b);
+        this.knock(p, b.x, b.z, m.push, 4.5);
+        if (m.chill) p.frozen = Math.max(p.frozen || 0, m.chill);
+      }
+      a.events.push({ type: 'boss-slam', id: b.id, kind: b.kind, move: m.id, x: b.x + Math.sin(b.angle) * 1.8, y: b.y, z: b.z + Math.cos(b.angle) * 1.8 });
+      return;
+    }
+    if (m === moves.shot) {
+      this.fire(b, { x: act.tx, y: act.ty, z: act.tz }, BOSS_SHOTS[b.kind], t?.id);
+      return;
+    }
+    switch (m.id) {
+      case 'ignite':
+        this.hazards.push({ id: ++this.shotId, kind: 'ring', x: b.x, z: b.z, y: b.y, r: 6, time: 4.5, max: 4.5, owner: b.id, team: 'boss', dps: 20 });
+        a.events.push({ type: 'fire-ring', x: b.x, y: b.y, z: b.z, r: 6 });
+        break;
+      case 'meteor':
+        for (const s of act.spots) {
+          const y = groundHeight(s.x, s.z, a.map);
+          this.bossBlast(b, s.x, y + 0.6, s.z, 3.2, 30, 'meteor', 7);
+          this.hazards.push({ id: ++this.shotId, kind: 'embers', x: s.x, z: s.z, y, r: 1.8, time: 3.5, max: 3.5, owner: b.id, team: 'boss', dps: 12 });
+        }
+        break;
+      case 'blink': {
+        if (!t) break;
+        const back = t.angle + Math.PI,
+          x = clampTo(t.x + Math.sin(back) * 3.5, b.home.x, b.bounds.x),
+          z = clampTo(t.z + Math.cos(back) * 3.5, b.home.z, b.bounds.z);
+        a.events.push({ type: 'blink', id: b.id, x: b.x, y: b.y, z: b.z, tx: x, ty: groundHeight(x, z, a.map), tz: z });
+        b.x = x;
+        b.z = z;
+        b.angle = Math.atan2(t.x - x, t.z - z);
+        b.cd.melee = 0.2;
+        break;
+      }
+      case 'well': {
+        const s = act.spot,
+          y = groundHeight(s.x, s.z, a.map);
+        this.hazards.push({ id: ++this.shotId, kind: 'well', x: s.x, z: s.z, y, r: 5.5, time: 2.4, max: 2.4, owner: b.id, team: 'boss', dps: 0, pull: 6.5, implode: { r: 3.4, damage: 34 } });
+        break;
+      }
+      case 'leap':
+        act.leap = { x0: b.x, z0: b.z, x1: act.spot.x, z1: act.spot.z, y0: b.y, t: 0, T: 0.6 };
+        a.events.push({ type: 'boss-leap', id: b.id, x: b.x, y: b.y, z: b.z, tx: act.spot.x, tz: act.spot.z });
+        break;
+      case 'venom': {
+        const s = act.spot,
+          y = groundHeight(s.x, s.z, a.map);
+        this.hazards.push({ id: ++this.shotId, kind: 'poison', x: s.x, z: s.z, y, r: 4, time: 6, max: 6, owner: b.id, team: 'boss', dps: 10 });
+        a.events.push({ type: 'venom', id: b.id, x: s.x, y, z: s.z, fx: b.x, fy: b.y + 1.6, fz: b.z });
+        break;
+      }
+      case 'burrow':
+        // Down it goes: nothing can hit it until it surfaces under its target.
+        b.under = true;
+        act.phase = 'travel';
+        a.events.push({ type: 'burrow', id: b.id, x: b.x, y: b.y, z: b.z });
+        break;
+      case 'sweep':
+        for (const p of a.players) {
+          if (p.hp <= 0 || p.inBus || hyp(p.x - b.x, p.z - b.z) > 6.5 || Math.abs(p.y - b.y) > 3) continue;
+          this.hurt(p, 24, b);
+          this.knock(p, b.x, b.z, 12, 5);
+        }
+        a.events.push({ type: 'boss-sweep', id: b.id, x: b.x, y: b.y, z: b.z, r: 6.5 });
+        break;
+    }
+  }
+  // ARACHNE · POUNCE: an arc through the air onto the marked spot.
+  stepLeap(b, act, dt) {
+    const l = act.leap;
+    l.t += dt;
+    const k = Math.min(1, l.t / l.T);
+    b.x = l.x0 + (l.x1 - l.x0) * k;
+    b.z = l.z0 + (l.z1 - l.z0) * k;
+    b.y = this.ground(b) + Math.sin(k * Math.PI) * 4.5;
+    if (k < 1) return;
+    act.leap = null;
+    b.y = this.ground(b);
+    const a = this.a;
+    for (const p of a.players) {
+      if (p.hp <= 0 || p.inBus || hyp(p.x - b.x, p.z - b.z) > 3.6 || Math.abs(p.y - b.y) > 3) continue;
+      this.hurt(p, 30, b);
+      this.knock(p, b.x, b.z, 9, 5);
+    }
+    a.events.push({ type: 'boss-land', id: b.id, kind: b.kind, x: b.x, y: b.y, z: b.z, r: 3.6 });
+    a.blast(b.x, b.y + 0.3, b.z, 2.2, 60, null, 'quake', null, { players: false, bosses: false });
+    act.dur = Math.max(act.dur, act.t + 0.6);
+  }
+  // TERRA · BURROW: under the ground to the marked spot, then up through whoever stands on it.
+  stepBurrow(b, act, dt) {
+    const s = act.spot;
+    if (act.phase === 'travel') {
+      const dx = s.x - b.x,
+        dz = s.z - b.z,
+        d = hyp(dx, dz);
+      if (d < 0.3) {
+        act.phase = 'rise';
+        act.rise = 0.55;
+        return;
+      }
+      const v = Math.min(d, 10 * dt);
+      b.x += (dx / d) * v;
+      b.z += (dz / d) * v;
+      b.angle = Math.atan2(dx, dz);
+    } else if (act.phase === 'rise') {
+      act.rise -= dt;
+      if (act.rise <= 0) this.surface(b, true);
+    } else if (act.phase === 'emerge') {
+      act.emerge -= dt;
+      if (act.emerge <= 0) {
+        act.phase = 'done';
+        act.dur = act.t;
+      }
+    }
+    // Never stuck underground, whatever happens to its target.
+    if (b.under && act.t > 6) this.surface(b, true);
+  }
+  surface(b, strike) {
+    const a = this.a,
+      act = b.act;
+    b.under = false;
+    if (!strike || !act) return;
+    for (const p of a.players) {
+      if (p.hp <= 0 || p.inBus || hyp(p.x - b.x, p.z - b.z) > 3.6 || Math.abs(p.y - b.y) > 3) continue;
+      this.hurt(p, 32, b);
+      this.knock(p, b.x, b.z, 8, 8);
+    }
+    a.events.push({ type: 'emerge', id: b.id, kind: b.kind, x: b.x, y: b.y, z: b.z, r: 3.6 });
+    a.blast(b.x, b.y + 0.3, b.z, 2.4, 80, null, 'quake', null, { players: false, bosses: false });
+    act.phase = 'emerge';
+    act.emerge = 1.1;
+    this.setAnim(b, 'emerge');
+  }
+  // A line of spikes bursting out of the ground one after another (frost wraith, earth spine).
+  spikeLine(x, z, angle, length, spec) {
+    for (let d = 2; d <= length; d += 1.8)
+      this.queue({ type: 'spike', x: x + Math.sin(angle) * d, z: z + Math.cos(angle) * d, at: (d / length) * 0.6, ...spec });
+  }
+  queue(q) {
+    this.pending.push({ ...q, y: groundHeight(q.x, q.z, this.a.map) + (q.type === 'spike' ? 0 : 1) });
   }
   // Blasts queued by a cataclysm or a line of ruin: one goes off at a time, so a whole quarter of the map
-  // comes apart in a rolling wave instead of a single frame-killing explosion.
+  // comes apart in a rolling wave instead of a single frame-killing explosion. Spikes hit whoever stands on them.
   stepPending(dt) {
     for (let n = this.pending.length - 1; n >= 0; n--) {
       const q = this.pending[n];
       q.at -= dt;
       if (q.at > 0) continue;
       this.pending.splice(n, 1);
-      this.a.blast(q.x, q.y, q.z, q.radius, q.damage, q.owner?.hp > 0 ? q.owner : null, q.cause || 'explosion');
+      if (q.type === 'spike') this.spike(q);
+      else if (q.boss) this.bossBlast(q.boss, q.x, q.y, q.z, q.radius, q.damage, q.cause || 'explosion');
+      else this.a.blast(q.x, q.y, q.z, q.radius, q.damage, q.owner?.hp > 0 ? q.owner : null, q.cause || 'explosion');
     }
   }
-  queueBlast(x, z, radius, damage, owner, delay, cause) {
-    this.pending.push({ x, y: groundHeight(x, z, this.a.map) + 1, z, radius, damage, owner, at: delay, cause });
+  spike(q) {
+    const a = this.a,
+      owner = q.owner?.hp > 0 ? q.owner : null;
+    for (const p of a.players) {
+      if (p.hp <= 0 || p.inBus || hyp(p.x - q.x, p.z - q.z) > q.radius || p.y - q.y > 2.5 || q.y - p.y > 1.5) continue;
+      if (owner && (p === owner || p.team === owner.team)) continue;
+      if (q.boss) this.hurt(p, q.damage, q.boss);
+      else a.damage(owner, p, q.damage);
+      p.vy = Math.max(p.vy || 0, 7);
+      if (q.chill) p.frozen = Math.max(p.frozen || 0, q.chill);
+    }
+    if (owner) for (const b of this.alive()) if (hyp(b.x - q.x, b.z - q.z) < q.radius + bossWidth(b.kind) / 2) this.damage(b, q.damage * 2, owner);
+    // The spikes split trees, rocks and whatever else stands in the line.
+    a.blast(q.x, q.y + 0.6, q.z, q.radius, q.boss ? 60 : 120, owner, 'spike', null, { players: false, bosses: false, silent: true });
+    a.events.push({ type: 'spike', kind: q.kind, x: q.x, y: q.y, z: q.z, r: q.radius });
   }
-  // Signature moves.
-  special(b, t, dist) {
-    const a = this.a;
-    if (b.kind === 'might' && dist < 9) {
-      b.cd.special = 12;
-      this.quakeAt(b.x, b.z, 9, 26, null, b);
-    } else if (b.kind === 'chaos' && dist < 26) {
-      b.cd.special = 14;
-      // A short line of ruin towards its target.
-      const ang = Math.atan2(t.x - b.x, t.z - b.z);
-      this.lineOfRuin(b.x, b.z, ang, 18, 5, 26, null, 'chaos');
-      a.events.push({ type: 'rift', x: b.x, y: b.y, z: b.z, angle: ang, length: 18, by: b.id });
-    } else if (b.kind === 'fire' && dist < 12) {
-      b.cd.special = 11;
-      this.hazards.push({ id: ++this.shotId, kind: 'ring', x: b.x, z: b.z, y: b.y, r: 6, time: 4.5, max: 4.5, owner: b.id, team: 'boss', dps: 20 });
-      a.events.push({ type: 'fire-ring', x: b.x, y: b.y, z: b.z, r: 6 });
-    } else if (b.kind === 'mind' && dist < 24 && this.exposed(b, t)) {
-      b.cd.special = 15;
-      t.flashback = FLASHBACK_TIME;
-      a.events.push({ type: 'flashback', id: t.id, by: b.id, x: t.x, y: t.y, z: t.z });
-    } else if (b.kind === 'void' && dist > 5 && dist < 22) {
-      b.cd.special = 8;
-      const back = t.angle + Math.PI,
-        x = clampTo(t.x + Math.sin(back) * 3.5, b.home.x, b.bounds.x),
-        z = clampTo(t.z + Math.cos(back) * 3.5, b.home.z, b.bounds.z);
-      a.events.push({ type: 'blink', id: b.id, x: b.x, y: b.y, z: b.z, tx: x, ty: groundHeight(x, z, a.map), tz: z });
-      b.x = x;
-      b.z = z;
-      b.angle = Math.atan2(t.x - x, t.z - z);
-      b.cd.melee = 0.2;
-    } else return false;
-    b.anim = 'cast';
-    b.animTime = 0;
-    return true;
-  }
-  fire(b, t, s) {
-    const from = { x: b.x + Math.sin(b.angle) * 1.1, y: b.y + BOSS_HEIGHT * 0.62, z: b.z + Math.cos(b.angle) * 1.1 },
-      to = { x: t.x, y: t.y + 1.1, z: t.z };
+  fire(b, to, s, target = null) {
+    const from = { x: b.x + Math.sin(b.angle) * 1.1, y: b.y + bossHeight(b.kind) * 0.62, z: b.z + Math.cos(b.angle) * 1.1 };
+    to = { x: to.x, y: (to.y ?? 0) + 1.1, z: to.z };
     for (let i = 0; i < s.count; i++) {
-      const spread = (i - (s.count - 1) / 2) * 0.12,
+      const spread = (i - (s.count - 1) / 2) * (s.spread || 0.12),
         dx = to.x - from.x,
         dz = to.z - from.z,
         h = hyp(dx, dz) || 1,
-        ang = Math.atan2(dx, dz) + spread,
-        pitch = Math.atan2(to.y - from.y, h),
-        dir = direction(ang, pitch);
-      this.shots.push({
-        id: ++this.shotId,
-        kind: s.kind,
-        owner: b.id,
-        target: t.id,
-        x: from.x,
-        y: from.y,
-        z: from.z,
-        vx: dir.x * s.speed,
-        vy: dir.y * s.speed,
-        vz: dir.z * s.speed,
-        life: 3.2,
-      });
+        ang = Math.atan2(dx, dz) + spread;
+      let vx, vy, vz;
+      if (s.gravity) {
+        // A lobbed shot: flat speed toward the target, and just enough lift to come down on it.
+        const T = h / s.speed;
+        vx = Math.sin(ang) * s.speed;
+        vz = Math.cos(ang) * s.speed;
+        vy = (to.y - from.y + 0.5 * s.gravity * T * T) / T;
+      } else {
+        const dir = direction(ang, Math.atan2(to.y - from.y, h));
+        vx = dir.x * s.speed;
+        vy = dir.y * s.speed;
+        vz = dir.z * s.speed;
+      }
+      this.shots.push({ id: ++this.shotId, kind: s.kind, owner: b.id, target, x: from.x, y: from.y, z: from.z, vx, vy, vz, life: 3.2 });
     }
     this.a.events.push({ type: 'boss-cast', id: b.id, kind: s.kind, x: from.x, y: from.y, z: from.z });
   }
@@ -386,7 +697,7 @@ export class BossSystem {
     const a = this.a;
     for (let n = this.shots.length - 1; n >= 0; n--) {
       const r = this.shots[n],
-        s = Object.values(BOSS_SHOTS).find((q) => q.kind === r.kind),
+        s = SHOT_SPECS[r.kind],
         b = this.list.find((q) => q.id === r.owner);
       if (s.homing) {
         const t = a.players.find((p) => p.id === r.target && p.hp > 0);
@@ -399,6 +710,7 @@ export class BossSystem {
           r.vz += (want.z / l) * s.speed * k - r.vz * k;
         }
       }
+      if (s.gravity) r.vy -= s.gravity * dt;
       const speed = hyp(r.vx, r.vy, r.vz) || 1,
         dir = { x: r.vx / speed, y: r.vy / speed, z: r.vz / speed },
         len = speed * dt,
@@ -406,7 +718,7 @@ export class BossSystem {
       let distance = cast.distance,
         victim = null;
       for (const p of a.players) {
-        if (p.hp <= 0) continue;
+        if (p.hp <= 0 || p.inBus) continue;
         const d = rayBox(r, dir, { x: p.x - 0.45, y: p.y, z: p.z - 0.45 }, { x: p.x + 0.45, y: p.y + 1.9, z: p.z + 0.45 }, len);
         if (d <= distance) {
           distance = d;
@@ -420,17 +732,13 @@ export class BossSystem {
       const hit = victim || distance < len || r.life <= 0 || Math.abs(r.x) > a.map.limit.x || Math.abs(r.z) > a.map.limit.z;
       if (!hit) continue;
       this.shots.splice(n, 1);
-      if (s.radius) {
-        for (const p of a.players)
-          if (p.hp > 0) {
-            const d = hyp(p.x - r.x, p.y + 0.9 - r.y, p.z - r.z);
-            if (d < s.radius) this.hurt(p, Math.round(s.damage * (1 - (d / s.radius) * 0.6)), b || { id: r.owner });
-          }
-        a.events.push({ type: 'explosion', x: r.x, y: r.y, z: r.z, radius: s.radius, cause: r.kind });
-      } else {
+      const owner = b || { id: r.owner, kind: 'fire' };
+      if (s.radius) this.bossBlast(owner, r.x - dir.x * 0.1, r.y - dir.y * 0.1, r.z - dir.z * 0.1, s.radius, s.damage, r.kind);
+      else {
         if (victim) {
-          this.hurt(victim, s.damage, b || { id: r.owner });
+          this.hurt(victim, s.damage, owner);
           if (s.chill) victim.frozen = Math.max(victim.frozen || 0, s.chill * 0.5);
+          if (s.web) victim.webbed = Math.max(victim.webbed || 0, s.web);
         }
         a.events.push({ type: 'boss-impact', kind: r.kind, x: r.x, y: r.y, z: r.z, hit: !!victim });
       }
@@ -443,17 +751,35 @@ export class BossSystem {
       h.time -= dt;
       if (h.time <= 0) {
         this.hazards.splice(n, 1);
+        if (h.implode) this.implode(h);
         continue;
       }
       const owner = a.players.find((p) => p.id === h.owner) || null;
-      // The ring burns everyone inside it except its caster's side.
-      for (const p of a.players)
-        if (p.hp > 0 && p.team !== h.team && hyp(p.x - h.x, p.z - h.z) < h.r + 0.6 && Math.abs(p.y - h.y) < 3)
-          a.damage(owner, p, h.dps * dt, owner ? null : h.owner);
-      if (owner)
-        for (const b of this.list)
-          if (b.hp > 0 && hyp(b.x - h.x, b.z - h.z) < h.r + 1) this.damage(b, h.dps * 2.5 * dt, owner);
+      for (const p of a.players) {
+        if (p.hp <= 0 || p.team === h.team || p.inBus || Math.abs(p.y - h.y) > 3) continue;
+        const d = hyp(p.x - h.x, p.z - h.z);
+        if (d > h.r + 0.6) continue;
+        // A gravity well drags everyone toward its middle before it collapses.
+        if (h.pull && d > 0.4) {
+          const k = h.pull * (0.6 + 0.4 * (1 - d / h.r));
+          p.push = { x: ((h.x - p.x) / d) * k, z: ((h.z - p.z) / d) * k };
+        }
+        if (h.dps) a.damage(owner, p, h.dps * dt, owner ? null : h.owner);
+      }
+      if (owner && h.dps)
+        for (const b of this.list) if (b.hp > 0 && hyp(b.x - h.x, b.z - h.z) < h.r + 1) this.damage(b, h.dps * 2.5 * dt, owner);
     }
+  }
+  // NULL · GRAVITY WELL: the well collapses on whoever it has pulled in.
+  implode(h) {
+    const a = this.a,
+      b = this.list.find((q) => q.id === h.owner) || { id: h.owner, kind: 'void' };
+    for (const p of a.players) {
+      if (p.hp <= 0 || p.inBus || hyp(p.x - h.x, p.z - h.z) > h.implode.r || Math.abs(p.y - h.y) > 3) continue;
+      this.hurt(p, h.implode.damage, b);
+      this.knock(p, h.x, h.z, 7, 6);
+    }
+    a.events.push({ type: 'implode', id: h.owner, x: h.x, y: h.y, z: h.z, r: h.implode.r });
   }
   // ——— Relic abilities ———
   use(p, index) {
@@ -499,67 +825,34 @@ export class BossSystem {
       best = { o, isBoss };
     };
     for (const o of this.a.enemies(p)) consider(o, o.y + 1.2, false);
-    for (const b of this.alive()) consider(b, b.y + BOSS_HEIGHT * 0.6, true);
+    for (const b of this.alive()) consider(b, b.y + bossHeight(b.kind) * 0.6, true);
     return best;
   }
-  flashback(p) {
-    const t = this.aimed(p);
-    if (!t) return false;
-    if (t.isBoss) t.o.confused = FLASHBACK_TIME;
-    else t.o.flashback = FLASHBACK_TIME;
-    this.a.events.push({ type: 'flashback', id: t.o.id, by: p.id, x: t.o.x, y: t.o.y, z: t.o.z });
-  }
-  // TITAN GLOVES · QUAKE: the ground bursts around you, throwing enemies off their feet.
-  quake(p) {
-    this.quakeAt(p.x, p.z, 10, 34, p, null);
-  }
-  quakeAt(x, z, radius, damage, owner, boss) {
+  // VENOM FANG · VENOM POOL: a pool of venom where you aim (up to 26 m), burning enemies who stand in it.
+  venom(p) {
     const a = this.a,
+      eye = { x: p.x, y: p.y + EYE_HEIGHT, z: p.z },
+      dir = direction(p.angle, Math.min(p.pitch, -0.05)),
+      cast = castMap(eye, dir, 26, a.map, null, true),
+      reach = Math.min(cast.distance, 26),
+      x = clampTo(eye.x + dir.x * reach, 0, a.map.limit.x - 1),
+      z = clampTo(eye.z + dir.z * reach, 0, a.map.limit.z - 1),
       y = groundHeight(x, z, a.map);
-    for (const o of a.players) {
-      if (o.hp <= 0 || o === owner || (owner && o.team === owner.team) || (boss && o.helperOf)) continue;
-      const d = hyp(o.x - x, o.z - z);
-      if (d > radius || Math.abs(o.y - y) > 4) continue;
-      const k = 1 - (d / radius) * 0.7;
-      if (owner) a.damage(owner, o, Math.round(damage * k));
-      else this.hurt(o, Math.round(damage * k), boss);
-      const n = d || 1;
-      o.push = { x: ((o.x - x) / n) * 11 * k, z: ((o.z - z) / n) * 11 * k };
-      o.vy = Math.max(o.vy || 0, 5.5 * k);
-    }
-    if (owner) for (const b of this.alive()) if (hyp(b.x - x, b.z - z) < radius + 1) this.damage(b, damage * 1.6, owner);
-    // It cracks the ground and whatever stands on it.
-    a.blast(x, y + 0.4, z, radius * 0.55, damage * 0.6, owner, 'quake');
-    a.events.push({ type: 'quake', x, y, z, r: radius, by: owner?.id || boss?.id || null });
+    this.hazards.push({ id: ++this.shotId, kind: 'poison', x, z, y, r: 4.5, time: 6, max: 6, owner: p.id, team: p.team, dps: 14 });
+    a.events.push({ type: 'venom', id: p.id, x, y, z, fx: eye.x, fy: eye.y - 0.3, fz: eye.z });
   }
-  // CHAOS SHARD · CATACLYSM: once a match, half the location comes apart in a rolling wave of blasts.
-  cataclysm(p) {
-    const a = this.a,
-      reach = Math.min(70, Math.max(a.map.limit.x, a.map.limit.z) * 0.55),
-      rings = 5;
-    a.events.push({ type: 'cataclysm', id: p.id, x: p.x, y: p.y, z: p.z, r: reach });
-    for (let i = 1; i <= rings; i++) {
-      const r = (reach * i) / rings,
-        count = 4 + i * 3;
-      for (let k = 0; k < count; k++) {
-        const ang = (k / count) * Math.PI * 2 + i * 0.7,
-          x = p.x + Math.sin(ang) * r,
-          z = p.z + Math.cos(ang) * r;
-        if (Math.abs(x) > a.map.limit.x - 2 || Math.abs(z) > a.map.limit.z - 2) continue;
-        this.queueBlast(x, z, 9, 90, p, i * 0.45 + k * 0.02, 'cataclysm');
-      }
-    }
+  // VENOM FANG · POUNCE: a long spider's leap in the direction you look.
+  pounce(p) {
+    if (p.inBus || p.dropping) return false;
+    const f = { x: Math.sin(p.angle), z: Math.cos(p.angle) };
+    p.push = { x: f.x * 17, z: f.z * 17 };
+    p.vy = Math.max(p.vy || 0, 7.5);
+    p.grounded = false;
+    this.a.events.push({ type: 'pounce', id: p.id, x: p.x, y: p.y, z: p.z, angle: p.angle });
   }
-  // CHAOS SHARD · LINE OF RUIN: everything in a corridor ahead of you is torn open.
-  rift(p) {
-    const ang = p.angle;
-    this.lineOfRuin(p.x, p.z, ang, 46, 7, 70, p, 'rift');
-    this.a.events.push({ type: 'rift', id: p.id, x: p.x, y: p.y, z: p.z, angle: ang, length: 46, by: p.id });
-  }
-  lineOfRuin(x, z, angle, length, radius, damage, owner, cause) {
-    const step = radius * 0.8;
-    for (let d = radius; d <= length; d += step)
-      this.queueBlast(x + Math.sin(angle) * d, z + Math.cos(angle) * d, radius, damage, owner, (d / length) * 0.9, cause);
+  // EARTH SPINE · ERUPTION: a line of stone spikes bursts out of the ground ahead of you.
+  eruption(p) {
+    this.spikeLine(p.x, p.z, p.angle, 22, { kind: 'earth', damage: 45, radius: 1.7, owner: p });
   }
   portalA(p) {
     return this.placePortal(p, 'a');
@@ -643,32 +936,51 @@ export class BossSystem {
           s = Math.sin(outYaw - inYaw);
         p.push = { x: p.push.x * c + p.push.z * s, z: -p.push.x * s + p.push.z * c };
       }
-    } else if (toFloor && !fromFloor) p.angle = p.angle;
-    else if (!toFloor) p.angle = Math.atan2(to.nx, to.nz);
+    } else if (!toFloor) p.angle = Math.atan2(to.nx, to.nz);
     p.portalCd = 0.5;
     a.events.push({ type: 'teleport', id: p.id, owner, x: p.x, y: p.y, z: p.z, tx: x, ty: y, tz: z, angle: p.angle });
     a.place(p, x, z, y);
     a.world.propagateModifiedBodyPositionsToColliders();
     p.grounded = false;
   }
-  // Bots use relics too: ring and nova up close, helpers and flashback when fighting. Returns an ability index.
+  // Bots use relics too: the ring of fire up close, helpers, venom, the pounce and the eruption when fighting.
+  // Returns an ability index.
   botChoice(p, target, distance) {
     if (!p.relic || !target) return -1;
     const ids = RELICS[p.relic.id].abilities.map((a) => a.id),
       ready = (id) => ids.includes(id) && p.relic.cd[ids.indexOf(id)] <= 0;
     if (ready('ring') && distance < 6) return ids.indexOf('ring');
-    if (ready('quake') && distance < 8) return ids.indexOf('quake');
     if (ready('summon') && distance < 25) return ids.indexOf('summon');
-    if (ready('flashback') && distance < 40) return ids.indexOf('flashback');
-    // Bots only open a line of ruin, never a cataclysm — that one is the player's card to play.
-    if (ready('rift') && distance > 8 && distance < 40) return ids.indexOf('rift');
+    if (ready('venom') && distance > 4 && distance < 22) return ids.indexOf('venom');
+    if (ready('eruption') && distance < 18) return ids.indexOf('eruption');
+    if (ready('pounce') && distance > 9 && distance < 20) return ids.indexOf('pounce');
     return -1;
   }
   snapshot() {
     return {
-      bosses: this.list.map(({ cd, home, bounds, ...b }) => ({ ...b, respawn: Number.isFinite(b.respawn) ? b.respawn : -1 })),
+      // Only what clients draw: the AI's cooldowns, home and move bookkeeping stay here.
+      bosses: this.list.map((b) => ({
+        id: b.id,
+        kind: b.kind,
+        name: b.name,
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        angle: b.angle,
+        anim: b.anim,
+        seq: b.seq,
+        hp: b.hp,
+        maxHp: b.maxHp,
+        target: b.target,
+        frozen: b.frozen,
+        confused: b.confused,
+        under: b.under,
+        rage: b.rage,
+        hitAt: b.hitAt,
+        respawn: Number.isFinite(b.respawn) ? b.respawn : -1,
+      })),
       bossShots: this.shots.map((s) => ({ id: s.id, kind: s.kind, x: s.x, y: s.y, z: s.z, vx: s.vx, vy: s.vy, vz: s.vz })),
-      hazards: this.hazards.map((h) => ({ ...h })),
+      hazards: this.hazards.map(({ implode, ...h }) => ({ ...h, implode: !!implode })),
       portals: Object.fromEntries(Object.entries(this.portals).map(([k, v]) => [k, { a: v.a ? { ...v.a } : null, b: v.b ? { ...v.b } : null }])),
       relics: this.drops.map((d) => ({ ...d })),
     };
@@ -680,4 +992,7 @@ function turn(from, to, max) {
 }
 function clampTo(v, centre, half) {
   return Math.max(centre - half, Math.min(centre + half, v));
+}
+function boxNear(o, x, z, r) {
+  return Math.abs(o.x - x) < o.w / 2 + r && Math.abs(o.z - z) < o.d / 2 + r;
 }

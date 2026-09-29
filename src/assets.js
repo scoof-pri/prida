@@ -1,8 +1,12 @@
 import * as T from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { WEAPONS, GEAR } from './catalog.js';
 import { DECOR_SIZES } from './decor-sizes.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import { gunMaterial } from './materials.js';
+// Players and bots (0.27.1, back from 0.21): Quaternius' Toon Shooter soldiers with their own clips and the guns
+// that ship in their right hands. (0.22–0.27 used combat operators, soldier.js; see PRIDA-BASELINE §7.13.)
+export const CHARACTER_FILES = ['soldier', 'hazmat', 'scout'];
 const models = new Map(),
   textures = new Map();
 // CC0 Poly Haven PBR sets (see ASSET-CREDITS.md): colour map, OpenGL normal map (_n) and AO/roughness/metal map
@@ -19,7 +23,6 @@ export const TEXTURES = {
   tiles: [121, 111, 107],
   wood: [155, 128, 99],
   roof: [120, 122, 120],
-  metal: [61, 50, 28],
   bark: [95, 86, 64],
   rock: [167, 155, 140],
   claytiles: [145, 79, 42],
@@ -30,6 +33,9 @@ export const TEXTURES = {
   panels: [141, 133, 112],
   sidewalk: [127, 116, 102],
   pinebark: [102, 82, 64],
+  steel: [96, 97, 99],
+  gunmetal: [30, 34, 33],
+  worn: [63, 63, 63],
 };
 // Foliage cards (RGBA, composed from ambientCG leaf atlases by scripts/make-foliage.py).
 export const FOLIAGE = ['leaves', 'needles'];
@@ -128,6 +134,34 @@ async function loadTextures(done) {
     }),
   );
 }
+// A mesh is closed when every edge (after welding equal positions) is shared by at least two triangles.
+export function closedMesh(geometry) {
+  const pos = geometry?.attributes?.position;
+  if (!pos) return false;
+  const index = geometry.index,
+    ids = new Map(),
+    vid = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = Math.round(pos.getX(i) * 1e4) + ',' + Math.round(pos.getY(i) * 1e4) + ',' + Math.round(pos.getZ(i) * 1e4);
+    let v = ids.get(k);
+    if (v === undefined) ids.set(k, (v = ids.size));
+    vid[i] = v;
+  }
+  const n = ids.size,
+    edges = new Map(),
+    tris = (index ? index.count : pos.count) / 3,
+    at = (t, c) => vid[index ? index.getX(t * 3 + c) : t * 3 + c];
+  for (let t = 0; t < tris; t++)
+    for (let c = 0; c < 3; c++) {
+      const a = at(t, c),
+        b = at(t, (c + 1) % 3);
+      if (a === b) continue;
+      const k = a < b ? a * n + b : b * n + a;
+      edges.set(k, (edges.get(k) || 0) + 1);
+    }
+  for (const count of edges.values()) if (count < 2) return false;
+  return edges.size > 0;
+}
 export async function loadAssets(progress = () => {}) {
   // Building roofs are procedural since 0.20 (roofs.js): the city-kit building models are not loaded.
   const names = [
@@ -135,11 +169,8 @@ export async function loadAssets(progress = () => {}) {
       ...WEAPONS.map((w) => w.model),
       ...GEAR.map((g) => g.model),
       ...Object.keys(DECOR_SIZES).map((n) => 'decor-' + n),
-      'soldier',
-      'hazmat',
-      'scout',
+      ...CHARACTER_FILES,
       'chest',
-      'boss',
     ]),
   ];
   let next = 0,
@@ -152,15 +183,20 @@ export async function loadAssets(progress = () => {}) {
       while (next < names.length) {
         const name = names[next++];
         const gltf = await loader.loadAsync(`./models/${name}.${import.meta.env?.VITE_MODEL_EXT || 'glb'}`);
+        // The kits flag every material double-sided. Closed meshes never show their back faces, so those are
+        // culled (half the fragments of a prop); open ones — the loot crate without a top, sheets, canopies — keep
+        // both sides, or they turn see-through from behind.
+        const open = new Set();
+        gltf.scene.traverse((o) => {
+          if (o.isMesh && !closedMesh(o.geometry)) for (const m of [o.material].flat()) open.add(m);
+        });
         gltf.scene.traverse((o) => {
           if (o.isMesh) {
             o.castShadow = true;
             o.receiveShadow = true;
-            for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+            for (const m of [o.material].flat()) {
               m.roughness = 0.85;
-              // The kits flag their materials double-sided, but the meshes are closed: back faces are never seen,
-              // so they are culled (half the fragments of every prop). Only the glider's canopy is a thin sheet.
-              if (name !== 'glider') m.side = T.FrontSide;
+              m.side = open.has(m) || name === 'glider' ? T.DoubleSide : T.FrontSide;
             }
           }
         });
@@ -169,6 +205,31 @@ export async function loadAssets(progress = () => {}) {
       }
     }),
   ]);
+  // Weapons and gear: flat colours become steel, polymer, wood, rubber and paint finishes (materials.js) — the
+  // guns in the soldiers' hands too (they are the same models the first-person weapons were cut from).
+  const finish = (o) => {
+    if (o.isMesh) o.material = Array.isArray(o.material) ? o.material.map(gunMaterial) : gunMaterial(o.material);
+  };
+  for (const name of new Set([...WEAPONS.map((w) => w.model), ...GEAR.map((g) => g.model)])) models.get(name)?.scene.traverse(finish);
+  for (const name of CHARACTER_FILES)
+    models.get(name)?.scene.traverse((o) => {
+      if (ALL_CHARACTER_GUNS.includes(o.name)) o.traverse(finish);
+    });
+}
+// A soldier (0 soldier, 1 hazmat, 2 scout) with its own skeleton, and its animation mixer and clips.
+export function character(index = 0) {
+  const a = models.get(CHARACTER_FILES[((index % 3) + 3) % 3]),
+    root = cloneSkeleton(a.scene),
+    mixer = new T.AnimationMixer(root);
+  root.scale.setScalar(0.88);
+  return { model: root, mixer, clips: a.animations };
+}
+// Weapon nodes that ship attached to the soldiers' right hands. Everything else is mounted there at runtime.
+export const ALL_CHARACTER_GUNS = ['AK', 'GrenadeLauncher', 'Knife_1', 'Knife_2', 'Pistol', 'Revolver', 'Revolver_Small', 'RocketLauncher', 'ShortCannon', 'Shotgun', 'Shovel', 'SMG', 'Sniper', 'Sniper_2'];
+// The node a weapon shows as in a soldier's hand (null: bare hands).
+export function characterGun(w) {
+  if (!w || w.fists) return null;
+  return ALL_CHARACTER_GUNS.includes(w.char) ? w.char : 'Mount_' + w.model;
 }
 export function modelAsset(name) {
   return models.get(name) || null;
@@ -194,43 +255,26 @@ export function modelParts(name) {
   partsCache.set(name, parts);
   return parts;
 }
-export function character(index = 0) {
-  const a = models.get(['soldier', 'hazmat', 'scout'][index % 3]),
-    root = cloneSkeleton(a.scene),
-    mixer = new T.AnimationMixer(root);
-  root.scale.setScalar(0.88);
-  return { model: root, mixer, clips: a.animations };
-}
-// Weapon nodes that ship attached to the character rigs. Weapons marked `mount:<model>` are added at runtime.
-export const ALL_CHARACTER_GUNS = [
-  'AK',
-  'GrenadeLauncher',
-  'Knife_1',
-  'Knife_2',
-  'Pistol',
-  'Revolver',
-  'Revolver_Small',
-  'RocketLauncher',
-  'ShortCannon',
-  'Shotgun',
-  'Shovel',
-  'SMG',
-  'Sniper',
-  'Sniper_2',
-];
-export const CHARACTER_GUNS = WEAPONS.map((w) => (w.char.startsWith('mount:') ? 'Mount_' + w.model : w.char));
-// First-person model: scaled to its configured length and centred, muzzle / blade tip toward -Z.
+// First-person model: scaled to its configured length and centred, muzzle / blade tip toward -Z. The third-person
+// characters hold the same models (render.js heldWeapon).
 export function gun(index = 0) {
   const w = WEAPONS[index],
-    root = new T.Group(),
-    mesh = model(w.model);
+    root = new T.Group();
+  // Bare hands: nothing in them (the first-person view draws the fists, characters close their hands).
+  if (w.fists) {
+    root.userData.length = w.fp.len;
+    root.userData.empty = true;
+    return root;
+  }
+  const mesh = model(w.model);
   root.add(mesh);
   mesh.rotation.set(...w.fp.rot);
   mesh.updateMatrixWorld(true);
   const bounds = new T.Box3().setFromObject(mesh),
     size = bounds.getSize(new T.Vector3()),
     center = bounds.getCenter(new T.Vector3());
-  const s = w.fp.len / size.z;
+  // Items keep their real size (the model is built in metres); weapons are scaled to their configured length.
+  const s = w.consumable ? 1 : w.fp.len / size.z;
   mesh.scale.multiplyScalar(s);
   mesh.position.set(-center.x * s, -center.y * s, -center.z * s);
   if (w.melee || w.projectile === 'dagger') {
@@ -243,7 +287,7 @@ export function gun(index = 0) {
     root.add(pivot);
     root.userData.pivot = pivot;
   }
-  root.userData.length = w.fp.len;
+  root.userData.length = w.consumable ? size.z : w.fp.len;
   root.userData.barrels = mesh.getObjectByName('Barrels') || null;
   return root;
 }

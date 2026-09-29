@@ -327,7 +327,7 @@ export class Nature {
       straw = detailMaterial('fabric', 0xd8b764, { roughness: 0.95, key: 'hay' }),
       crate = detailMaterial('oak', 0x9d7760, { box: true, roughness: 0.8, key: 'supply' }),
       benchWood = detailMaterial('oak', 0x976f4c, { box: true, roughness: 0.7, key: 'bench' }),
-      benchIron = detailMaterial('metal', 0x3c4a48, { box: true, roughness: 0.5, key: 'bench-leg' });
+      benchIron = detailMaterial('steel', 0x3c4a48, { box: true, roughness: 0.5, key: 'bench-leg' });
     const add = (key, geometry, material, matrix, color, group, prop, shadow = true) => {
       if (!batches.has(key)) batches.set(key, new CulledBatch(geometry, material, { colors: true, shadow }));
       const b = batches.get(key),

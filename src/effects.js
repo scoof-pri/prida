@@ -1,9 +1,30 @@
 import * as T from 'three';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { objectSurface } from './materials.js';
 import { groundHeight } from './terrain.js';
 const UP = new T.Vector3(0, 1, 0),
   FRONT = new T.Vector3(0, 0, 1);
 const rand = (a, b) => a + Math.random() * (b - a);
 // Fixed-capacity pools: sustained fire never grows the scene graph or allocates GPU geometry.
+// A lump of broken concrete about one unit across: an icosahedron with its corners pushed in and out
+// (deterministically), a little flattened, flat-shaded so every break reads as a face.
+function rubbleGeometry() {
+  const g = mergeVertices(new T.IcosahedronGeometry(0.62, 0)),
+    p = g.attributes.position;
+  const hash = (x, y, z, s) => Math.abs(Math.sin(x * 12.9898 + y * 78.233 + z * 37.719 + s) * 43758.5453) % 1;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i),
+      y = p.getY(i),
+      z = p.getZ(i),
+      k = 0.58 + hash(x, y, z, 0) * 0.7,
+      j = 0.16;
+    p.setXYZ(i, x * k + (hash(x, y, z, 1) - 0.5) * j, (y * k + (hash(x, y, z, 2) - 0.5) * j) * 0.8, z * k + (hash(x, y, z, 3) - 0.5) * j);
+  }
+  const flat = g.toNonIndexed();
+  flat.computeVertexNormals();
+  g.dispose();
+  return flat;
+}
 export class CombatEffects {
   constructor(scene, map, { lite = false } = {}) {
     this.scene = scene;
@@ -56,9 +77,16 @@ export class CombatEffects {
     this.debrisCap = lite ? 360 : 1400;
     this.debris = Array(this.debrisCap).fill(null);
     this.debrisCursor = 0;
+    // Debris: broken lumps of concrete (a jagged low-poly stone), textured in their own space, tinted per
+    // piece with the colour of what it broke off.
     this.debrisMesh = new T.InstancedMesh(
-      new T.BoxGeometry(1, 1, 1),
-      new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85 }),
+      rubbleGeometry(),
+      objectSurface(new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, flatShading: true }), {
+        surface: 'concrete',
+        size: 0.22,
+        strength: 1.4,
+        normal: 1.6,
+      }),
       this.debrisCap,
     );
     this.debrisMesh.frustumCulled = false;
@@ -95,6 +123,25 @@ export class CombatEffects {
     this.ringGeo = new T.RingGeometry(0.86, 1, 40);
     this.light = new T.PointLight(0xffa048, 0, 12, 2);
     scene.add(this.light);
+    // Muzzle flashes light up the shooter and the wall beside them for a frame or two. They borrow the explosion
+    // light when no blast is lighting the scene: another light would cost every pixel of every material.
+    this.muzzleTime = 0;
+    this.muzzleAt = new T.Vector3();
+    // Brass: real cartridge cases (and red shotgun shells) that spin out of the ejection port, bounce and lie on
+    // the ground for a few seconds. One instanced mesh, a fixed pool.
+    this.casingCap = lite ? 60 : 180;
+    this.casings = Array(this.casingCap).fill(null);
+    this.casingCursor = 0;
+    this.casingMesh = new T.InstancedMesh(
+      new T.CylinderGeometry(1, 1, 1, 7),
+      new T.MeshStandardMaterial({ color: 0xffffff, metalness: 0.85, roughness: 0.32 }),
+      this.casingCap,
+    );
+    this.casingMesh.frustumCulled = false;
+    this.casingMesh.count = 0;
+    this.casingMesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
+    for (let i = 0; i < this.casingCap; i++) this.casingMesh.setColorAt(i, this.color.setHex(0xd8a44c));
+    scene.add(this.casingMesh);
     this.flashTime = 0;
     this.makeHaze();
     this.reset(map);
@@ -146,6 +193,7 @@ export class CombatEffects {
     for (const p of this.pools) p.items.fill(null);
     this.tracers.fill(null);
     this.debris.fill(null);
+    this.casings?.fill(null);
     this.marks.fill(null);
     for (const r of this.rings) {
       r.mesh.removeFromParent();
@@ -160,7 +208,9 @@ export class CombatEffects {
   emit(position, velocity, color, size, life, { smoke = false, gravity = 0, drag = 1, grow = 0 } = {}) {
     const p = this.pools[smoke ? 1 : 0],
       cap = this.lite ? Math.floor(p.cap * 0.4) : p.cap,
-      i = p.cursor++ % cap;
+      i = p.cursor++ % cap,
+      c = this.color.set(color);
+    // Colour as three numbers: a Color object per particle was thousands of short-lived allocations a second.
     p.items[i] = {
       x: position.x,
       y: position.y,
@@ -168,7 +218,9 @@ export class CombatEffects {
       vx: velocity.x,
       vy: velocity.y,
       vz: velocity.z,
-      color: new T.Color(color),
+      r: c.r,
+      g: c.g,
+      b: c.b,
       size,
       life,
       maxLife: life,
@@ -201,6 +253,9 @@ export class CombatEffects {
       rotation: rand(0, 6),
       spin: rand(3, 9),
       shade: rand(0.85, 1.08),
+      // Stretch each lump a little differently: slabs, wedges and nuggets from one shape.
+      ax: rand(0.75, 1.35),
+      ay: rand(0.6, 1.1),
     };
   }
   // Concrete cells knocked out of a wall: each becomes one or two cubes thrown away from `from` (the blast,
@@ -382,8 +437,8 @@ export class CombatEffects {
       });
     }
   }
-  // A flat shockwave ring on the ground, used by explosions, quakes and the cataclysm.
-  groundRing(x, z, color = 0xffcc80, life = 0.45, grow = 6, peak = 0.55) {
+  // A flat shockwave ring on the ground (or at height y: a roof), used by explosions, impulses, pads and items.
+  groundRing(x, z, color = 0xffcc80, life = 0.45, grow = 6, peak = 0.55, y = null) {
     while (this.rings.length >= 10) {
       const r = this.rings.shift();
       r.mesh.removeFromParent();
@@ -402,48 +457,86 @@ export class CombatEffects {
       }),
     );
     mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(x, groundHeight(x, z, this.map) + 0.075, z);
+    mesh.position.set(x, (y ?? groundHeight(x, z, this.map)) + 0.075, z);
     this.scene.add(mesh);
     this.rings.push({ mesh, life, max: life, grow, peak });
   }
   event(e) {
-    // TITAN GLOVES · QUAKE: the ground bursts and throws dirt outwards.
-    if (e.type === 'quake') {
-      const y = groundHeight(e.x, e.z, this.map);
-      this.groundRing(e.x, e.z, 0xffb43c, 0.75, (e.r || 10) / 1.1, 0.7);
-      this.burst({ x: e.x, y: y + 0.3, z: e.z }, 18, 0xc9a978, 0.6, 1.1, true, 4);
-      for (let i = 0; i < (this.lite ? 6 : 18); i++) {
+    // 0.27 items. IMPULSE: a ring of air and a blue flash that throws everything outwards.
+    if (e.type === 'impulse') {
+      const pos = { x: e.x, y: e.y, z: e.z };
+      this.groundRing(e.x, e.z, 0x6fd8ff, 0.5, (e.radius || 6) / 1.1, 0.8, e.y - 0.3);
+      this.groundRing(e.x, e.z, 0xffffff, 0.3, (e.radius || 6) / 1.6, 0.6, e.y - 0.3);
+      for (let i = 0; i < (this.lite ? 10 : 26); i++) {
         const a = rand(0, Math.PI * 2),
-          r = rand(1, e.r || 10);
-        this.addDebris(
-          { x: e.x + Math.cos(a) * r, y: y + 0.2, z: e.z + Math.sin(a) * r },
-          { x: Math.cos(a) * rand(1, 4), y: rand(4, 9), z: Math.sin(a) * rand(1, 4) },
-          rand(1, 2),
-          rand(0.08, 0.2),
-          0x8a7351,
-        );
+          up = rand(-0.2, 0.8);
+        this.emit(pos, { x: Math.cos(a) * rand(7, 13), y: up * 6, z: Math.sin(a) * rand(7, 13) }, i % 3 ? 0x8fe4ff : 0xffffff, rand(0.08, 0.18), rand(0.3, 0.55), { drag: 2.2 });
       }
+      this.burst(pos, 8, 0xcfeeff, 1.2, 0.25, false, 1);
+      this.light.position.set(e.x, e.y + 0.5, e.z);
+      this.flashTime = 0.12;
       return;
     }
-    // CHAOS SHARD: a seam of green light tears open along the ground ahead.
-    if (e.type === 'rift') {
-      const n = Math.min(16, Math.round((e.length || 20) / 3));
-      for (let i = 1; i <= n; i++) {
-        const d = (i / n) * (e.length || 20),
-          x = e.x + Math.sin(e.angle) * d,
-          z = e.z + Math.cos(e.angle) * d,
-          y = groundHeight(x, z, this.map);
-        this.emit({ x, y: y + 0.2, z }, { x: 0, y: rand(5, 11), z: 0 }, 0x38e0b0, rand(0.3, 0.7), rand(0.5, 1), { drag: 1.5, grow: 1.4 });
-        if (i % 2 === 0) this.groundRing(x, z, 0x38e0b0, 0.5, 3.5, 0.5);
-      }
+    // A launch pad fires: a purple column and a ring on the pad.
+    if (e.type === 'pad') {
+      this.groundRing(e.x, e.z, 0xc58cff, 0.45, 2.2, 0.8, e.y);
+      for (let i = 0; i < (this.lite ? 8 : 20); i++)
+        this.emit({ x: e.x + rand(-0.5, 0.5), y: e.y + 0.2, z: e.z + rand(-0.5, 0.5) }, { x: rand(-0.6, 0.6), y: rand(9, 16), z: rand(-0.6, 0.6) }, i % 2 ? 0xc58cff : 0xffffff, rand(0.08, 0.16), rand(0.4, 0.8), { drag: 1.8 });
+      this.burst({ x: e.x, y: e.y + 0.2, z: e.z }, 8, 0xb8b0a4, 0.6, 0.9, true, 1.5);
       return;
     }
-    // CATACLYSM: the sky goes green and the horizon lights up before the blasts arrive.
-    if (e.type === 'cataclysm') {
-      this.groundRing(e.x, e.z, 0x38e0b0, 1.6, (e.r || 60) / 1.05, 0.8);
-      this.burst({ x: e.x, y: e.y + 1, z: e.z }, 26, 0x9ff0d8, 1.2, 1.6, false, 7);
-      this.flashTime = 0.4;
-      this.light.position.set(e.x, e.y + 3, e.z);
+    // Armour gone: blue shards burst off the body.
+    if (e.type === 'armor-break') {
+      const pos = { x: e.x, y: e.y, z: e.z };
+      for (let i = 0; i < (this.lite ? 6 : 16); i++) this.emit(pos, { x: rand(-3, 3), y: rand(0.5, 3.5), z: rand(-3, 3) }, i % 3 ? 0x6fc3ff : 0xe8f6ff, rand(0.05, 0.11), rand(0.35, 0.6), { gravity: 6, drag: 1.2 });
+      return;
+    }
+    // A clinger sticks: an orange splat.
+    if (e.type === 'stick') {
+      this.burst({ x: e.x, y: e.y, z: e.z }, 7, 0xff8b3d, 0.07, 0.35, false, 1.8);
+      return;
+    }
+    // Something set down: a puff of dust where it lands.
+    if (e.type === 'deploy') {
+      this.burst({ x: e.x, y: e.y + 0.1, z: e.z }, 7, 0xb9ad96, 0.45, 0.7, true, 1.2);
+      return;
+    }
+    // Used an item: motes of its colour rise round the player (e.color is set by the view).
+    if (e.type === 'use') {
+      const c = e.color ?? 0x7fd6f0;
+      for (let i = 0; i < (this.lite ? 8 : 18); i++) {
+        const a = (i / 18) * Math.PI * 4,
+          r = 0.45 + (i % 3) * 0.08;
+        this.emit({ x: e.x + Math.cos(a) * r, y: e.y + 0.2 + (i / 18) * 1.2, z: e.z + Math.sin(a) * r }, { x: -Math.sin(a) * 0.8, y: rand(1.2, 2.2), z: Math.cos(a) * 0.8 }, i % 4 ? c : 0xffffff, rand(0.06, 0.12), rand(0.6, 1), { drag: 1.4 });
+      }
+      this.groundRing(e.x, e.z, c, 0.5, 1.4, 0.5, e.y);
+      return;
+    }
+    // A chest bursts open in its tier's colour; one that restocks glints.
+    if (e.type === 'chest-open') {
+      const pos = { x: e.x, y: e.y + 0.7, z: e.z },
+        c = e.color ?? 0xffd06a;
+      this.burst(pos, this.lite ? 8 : 18, c, 0.09, 0.8, false, 3.2);
+      this.burst(pos, 6, 0xffffff, 0.12, 0.4, false, 1.5);
+      for (let i = 0; i < (this.lite ? 4 : 10); i++) this.emit({ x: e.x + rand(-0.4, 0.4), y: e.y + 0.4, z: e.z + rand(-0.4, 0.4) }, { x: 0, y: rand(3, 6), z: 0 }, c, rand(0.05, 0.1), rand(0.8, 1.3), { drag: 1.2, gravity: -0.5 });
+      this.groundRing(e.x, e.z, c, 0.5, 2.5, 0.6, e.y);
+      return;
+    }
+    if (e.type === 'chest-refill') {
+      for (let i = 0; i < 10; i++) this.emit({ x: e.x + rand(-0.5, 0.5), y: e.y + rand(0.2, 1), z: e.z + rand(-0.5, 0.5) }, { x: 0, y: rand(0.5, 1.5), z: 0 }, 0xffe7a0, 0.07, 1, { drag: 1 });
+      return;
+    }
+    // An elimination: a burst of light and a puff where they fell (e.color: their team's).
+    if (e.type === 'eliminated') {
+      const pos = { x: e.x, y: e.y + 1, z: e.z };
+      this.burst(pos, this.lite ? 8 : 20, e.color ?? 0xffffff, 0.12, 0.6, false, 3.5);
+      this.burst(pos, 6, 0x6d6a66, 0.8, 1.4, true, 1.2);
+      this.groundRing(e.x, e.z, e.color ?? 0xffffff, 0.6, 2.6, 0.55, e.y);
+      return;
+    }
+    // Footfalls on sand, dirt and grass kick up a little dust (e.color: the ground).
+    if (e.type === 'step') {
+      this.emit({ x: e.x, y: e.y + 0.05, z: e.z }, { x: rand(-0.3, 0.3), y: 0.35, z: rand(-0.3, 0.3) }, e.color ?? 0xb8a98a, rand(0.18, 0.3), 0.55, { smoke: true, grow: 1.1 });
       return;
     }
     // A one-shot melee kill sparks gold.
@@ -486,23 +579,39 @@ export class CombatEffects {
       return;
     }
     if (e.type !== 'shot') return;
-    const start = new T.Vector3(e.x, e.y, e.z),
+    const eye = new T.Vector3(e.x, e.y, e.z),
       end = new T.Vector3(e.ex, e.ey, e.ez),
+      aim = end.clone().sub(eye).normalize(),
+      // The shooter's right hand side (their gun) and where the barrel ends.
+      rx = -aim.z,
+      rz = aim.x,
+      rl = Math.hypot(rx, rz) || 1,
+      side = { x: rx / rl, z: rz / rl },
+      muzzle = { x: e.x + side.x * 0.22 + aim.x * 0.95, y: e.y - 0.28 + aim.y * 0.95, z: e.z + side.z * 0.22 + aim.z * 0.95 },
+      // Seen from outside (anyone else, or yourself in third person) the tracer leaves the gun, not the eye the
+      // simulation fires from; in first person it starts at the eye, on the crosshair.
+      start = e.ownView || eye.distanceTo(end) < 1.5 ? eye : new T.Vector3(muzzle.x, muzzle.y, muzzle.z),
       dir = end.clone().sub(start),
       distance = dir.length();
     dir.normalize();
     if (distance > 0.05)
       this.tracers[this.traceCursor++ % 128] = { start, end, dir, distance, age: 0, speed: e.weapon === 5 ? 420 : 270 };
     if ((e.pellet || 0) === 0) {
-      const muzzle = start.clone().addScaledVector(dir, 0.7);
-      this.burst(muzzle, 3, 0xffda8d, 0.35, 0.08, false, 0.3);
-      this.addDebris(
-        { x: e.x + 0.18, y: e.y - 0.12, z: e.z },
-        { x: dir.z * 2.3, y: 2.2, z: -dir.x * 2.3 },
-        0.9,
-        0.045,
-        0xd8a44c,
-      );
+      // Your own flash in first person is drawn on the weapon in your hands instead.
+      if (!e.ownView) {
+        this.emit(muzzle, { x: 0, y: 0, z: 0 }, 0xfff0c0, 0.75, 0.05);
+        this.burst(muzzle, 3, 0xffda8d, 0.3, 0.08, false, 0.4);
+      }
+      if (!this.lite && this.flashTime <= 0) {
+        this.muzzleAt.set(muzzle.x, muzzle.y, muzzle.z);
+        this.muzzleTime = 0.06;
+      }
+      if (!e.noBrass)
+        this.casing(
+          { x: e.x + side.x * 0.24 + dir.x * 0.25, y: e.y - 0.3, z: e.z + side.z * 0.24 + dir.z * 0.25 },
+          { x: side.x * rand(1.8, 2.8) - dir.x * 0.4, y: rand(1.6, 2.6), z: side.z * rand(1.8, 2.8) - dir.z * 0.4 },
+          e.shell,
+        );
     }
     if (e.impact) {
       const hit = { x: e.ex + e.impact.x * 0.02, y: e.ey + e.impact.y * 0.02, z: e.ez + e.impact.z * 0.02 },
@@ -523,6 +632,28 @@ export class CombatEffects {
         this.mark(hit, new T.Vector3(e.impact.x, e.impact.y, e.impact.z), e.weapon === 1 ? 0.12 : 0.17);
       }
     }
+  }
+  // One spent case (or a red shotgun shell) thrown out of the ejection port.
+  casing(pos, vel, shell = false) {
+    const i = this.casingCursor++ % (this.lite ? Math.floor(this.casingCap * 0.5) : this.casingCap);
+    this.casings[i] = {
+      x: pos.x,
+      y: pos.y,
+      z: pos.z,
+      vx: vel.x,
+      vy: vel.y,
+      vz: vel.z,
+      life: this.lite ? 2.5 : 5,
+      shell,
+      r: shell ? 0.011 : 0.0065,
+      len: shell ? 0.062 : 0.04,
+      ax: rand(0, 6),
+      ay: rand(0, 6),
+      spin: rand(14, 26),
+      rest: false,
+    };
+    this.casingMesh.setColorAt(i, this.color.setHex(shell ? 0xb8302a : 0xd8a44c));
+    if (this.casingMesh.instanceColor) this.casingMesh.instanceColor.needsUpdate = true;
   }
   rocketTrail(projectiles, dt) {
     const active = new Set();
@@ -575,7 +706,7 @@ export class CombatEffects {
         p.z += p.vz * dt;
         attrs.position.setXYZ(i, p.x, p.y, p.z);
         const t = p.life / p.maxLife;
-        attrs.color.setXYZ(i, p.color.r, p.color.g, p.color.b);
+        attrs.color.setXYZ(i, p.r, p.g, p.b);
         attrs.size.array[i] = p.size + (1 - t) * p.grow;
         attrs.opacity.array[i] = (pool.smoke ? 0.8 : 1) * Math.min(1, t * 2.5);
       }
@@ -625,7 +756,8 @@ export class CombatEffects {
       p.rotation += p.spin * dt;
       d.position.set(p.x, p.y, p.z);
       d.rotation.set(p.rotation, p.rotation * 0.7, p.rotation * 0.3);
-      d.scale.setScalar(p.size * Math.min(1, p.life * 4));
+      const k = p.size * Math.min(1, p.life * 4);
+      d.scale.set(k * (p.ax || 1), k * (p.ay || 1), k);
       d.updateMatrix();
       this.debrisMesh.setMatrixAt(live, d.matrix);
       this.debrisMesh.setColorAt(live, this.color.setHex(p.color).multiplyScalar(p.shade || 1));
@@ -666,6 +798,61 @@ export class CombatEffects {
     }
     this.flashTime = Math.max(0, this.flashTime - dt);
     this.light.intensity = this.lite ? 0 : (this.flashTime / 0.22) * 18;
+    this.muzzleTime = Math.max(0, this.muzzleTime - dt);
+    if (this.flashTime <= 0 && this.muzzleTime > 0 && !this.lite) {
+      this.light.position.copy(this.muzzleAt);
+      this.light.intensity = 6 * (this.muzzleTime / 0.06);
+    }
+    // Cases: spin through the air, bounce twice with a skid, then lie still until they fade.
+    let n = 0;
+    for (let i = 0; i < this.casings.length; i++) {
+      const c = this.casings[i];
+      if (!c) continue;
+      c.life -= dt;
+      if (c.life <= 0) {
+        this.casings[i] = null;
+        continue;
+      }
+      if (!c.rest) {
+        c.vy -= 9.8 * dt;
+        c.x += c.vx * dt;
+        c.y += c.vy * dt;
+        c.z += c.vz * dt;
+        c.ax += c.spin * dt;
+        c.ay += c.spin * 0.6 * dt;
+        const floor = groundHeight(c.x, c.z, this.map) + c.r;
+        if (c.y < floor) {
+          c.y = floor;
+          if (Math.abs(c.vy) < 1.2) {
+            c.rest = true;
+            // Lying on its side.
+            c.ax = Math.PI / 2;
+          } else {
+            c.vy = Math.abs(c.vy) * 0.35;
+            c.vx *= 0.5;
+            c.vz *= 0.5;
+            c.spin *= 0.6;
+          }
+        }
+      }
+      d.position.set(c.x, c.y, c.z);
+      d.rotation.set(c.ax, c.ay, 0);
+      const fade = Math.min(1, c.life * 2);
+      d.scale.set(c.r * fade, c.len * fade, c.r * fade);
+      d.updateMatrix();
+      if (n !== i) {
+        // Keep live cases packed at the front; the colour follows its case.
+        this.casings[n] = c;
+        this.casings[i] = null;
+        this.casingMesh.getColorAt(i, this.color);
+        this.casingMesh.setColorAt(n, this.color);
+        if (this.casingMesh.instanceColor) this.casingMesh.instanceColor.needsUpdate = true;
+      }
+      this.casingMesh.setMatrixAt(n++, d.matrix);
+    }
+    this.casingCursor = Math.max(this.casingCursor % this.casingCap, n);
+    this.casingMesh.count = n;
+    this.casingMesh.instanceMatrix.needsUpdate = true;
   }
   dispose() {
     for (const p of this.pools) {
@@ -673,7 +860,7 @@ export class CombatEffects {
       p.mesh.geometry.dispose();
       p.mesh.material.dispose();
     }
-    for (const m of [this.tracerMesh, this.debrisMesh, this.markMesh]) {
+    for (const m of [this.tracerMesh, this.debrisMesh, this.markMesh, this.casingMesh]) {
       m.removeFromParent();
       m.geometry.dispose();
       m.material.map?.dispose();

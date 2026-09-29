@@ -51,15 +51,32 @@ export const COSMETICS = [
   { id: 'aura', name: 'Jade Aura', kind: 'effect', pass: true, color: '#82f0bc' },
   { id: 'embers', name: 'Embers', kind: 'effect', pass: true, color: '#ff7a3c' },
   // ——— Emotes (B, or the EMOTE button on touch) ———
-  { id: 'wave', name: 'Wave', kind: 'emote', price: 0, color: '#e6d3a8', clip: 'Wave' },
+  { id: 'wave', name: 'Wave', kind: 'emote', price: 0, color: '#e6d3a8', clip: 'Idle', wave: true },
   { id: 'yes', name: 'Nod', kind: 'emote', price: 60, color: '#e6d3a8', clip: 'Yes' },
   { id: 'no', name: 'Shake Head', kind: 'emote', price: 60, color: '#e6d3a8', clip: 'No' },
   { id: 'crouchdance', name: 'Squat Dance', kind: 'emote', price: 180, color: '#ffb570', clip: 'Duck', dance: { bob: 0.22, speed: 7 } },
-  { id: 'spindance', name: 'Spin Dance', kind: 'emote', pass: true, color: '#ff8fb0', clip: 'Wave', dance: { spin: 5.5, bob: 0.12, speed: 9 } },
-  { id: 'robot', name: 'Robot', kind: 'emote', pass: true, color: '#9fe3ff', clip: 'Walk', dance: { step: 3, bob: 0.06, speed: 1.4 } },
+  { id: 'spindance', name: 'Spin Dance', kind: 'emote', pass: true, color: '#ff8fb0', clip: 'Dance', dance: { spin: 5.5, bob: 0.06, speed: 9 } },
+  { id: 'robot', name: 'Robot', kind: 'emote', pass: true, color: '#9fe3ff', clip: 'Robot', dance: { step: 3, bob: 0.04, speed: 1.4 } },
   { id: 'jumpjack', name: 'Jump Jacks', kind: 'emote', pass: true, color: '#c9ff5e', clip: 'Jump_Idle', dance: { bob: 0.34, speed: 5 } },
 ];
 export const KINDS = ['operator', 'accessory', 'finish', 'pattern', 'charm', 'effect', 'emote'];
+// Rarity of a wardrobe item, for the card colours in the lobby (it changes nothing in a match): by price, battle-pass
+// items are epic, the last pass rewards and the dearest shop items legendary.
+export const COSMETIC_RARITIES = {
+  common: { name: 'COMMON', color: '#8f9b9d' },
+  uncommon: { name: 'UNCOMMON', color: '#5dbb4b' },
+  rare: { name: 'RARE', color: '#3d9be6' },
+  epic: { name: 'EPIC', color: '#a45be6' },
+  legendary: { name: 'LEGENDARY', color: '#e8943a' },
+};
+const LEGENDARY = new Set(['titan', 'halo', 'gold', 'nightranger', 'jumpjack']);
+export function cosmeticRarity(c) {
+  if (!c) return 'common';
+  if (LEGENDARY.has(c.id)) return 'legendary';
+  if (c.pass) return 'epic';
+  if (!c.price) return 'common';
+  return c.price <= 100 ? 'uncommon' : c.price <= 180 ? 'rare' : c.price <= 260 ? 'epic' : 'legendary';
+}
 const DEFAULTS = {
   operator: 'soldier',
   accessory: 'noaccessory',

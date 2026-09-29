@@ -38,6 +38,9 @@ const LOOKS = {
   panels: { size: 3.6, albedo: 0.55, tint: 0.7, normal: 0.9 },
   grass: { size: 3, albedo: 0.9, tint: 0.3, normal: 1 },
   sand: { size: 4, albedo: 0.9, tint: 0.3, normal: 1 },
+  steel: { size: 0.6, albedo: 0.4, tint: 0.7, normal: 1, metal: 1 },
+  gunmetal: { size: 0.3, albedo: 0.4, tint: 0.7, normal: 1, metal: 1 },
+  worn: { size: 0.8, albedo: 0.5, tint: 0.6, normal: 1, metal: 0.8 },
 };
 export const lookOf = (name) => LOOKS[name] || { size: 2, albedo: 0, tint: 1, normal: 0.8 };
 // Fast graphics: one texture sample per surface, no normal or AO/roughness maps.
@@ -54,6 +57,7 @@ export function setSurfaceQuality(lite) {
     m.needsUpdate = true;
   }
   for (const m of uvMaterials) applyUvMaps(m);
+  refreshSurfaces();
 }
 // Vertex colour that gives a UV-mapped surface the same look as detailMaterial(name, color) on the walls.
 export function surfaceTint(name, color, out = new T.Color()) {
@@ -624,10 +628,10 @@ const KIT_LOOKS = {
   carpetWhite: ['fabric', 0.9],
   carpetBlue: ['fabric', 0.9],
   carpetDarker: ['fabric', 0.9],
-  metal: ['metal', 0.35, 0.6],
-  metalLight: ['metal', 0.3, 0.3],
-  metalMedium: ['metal', 0.35, 0.65],
-  metalDark: ['metal', 0.4, 0.55],
+  metal: ['steel', 0.35, 0.6],
+  metalLight: ['steel', 0.3, 0.3],
+  metalMedium: ['steel', 0.35, 0.65],
+  metalDark: ['steel', 0.4, 0.55],
 };
 const kitCache = new Map();
 export function kitMaterial(m) {
@@ -649,51 +653,305 @@ export function kitMaterial(m) {
   const key = m.name + ':' + m.color.getHexString();
   if (!kitCache.has(key)) {
     const d = detailMaterial(look[0], m.color.getHex(), { roughness: look[1], metalness: look[2] ?? 0, key: 'kit', strength: 0.7 });
+    // Kit furniture is built from open shells (a table top, a chair seat): both sides must be drawn.
+    d.side = T.DoubleSide;
     kitCache.set(key, d);
   }
   return kitCache.get(key);
 }
-// Kenney car kit bodies (one colour-atlas texture): glossy paint, reflective dark windows, matte tyres.
-const carCache = new Map();
-export function carMaterial(m) {
-  if (carCache.has(m.uuid)) return carCache.get(m.uuid);
-  const c = m.clone();
-  c.roughness = 0.3;
-  c.metalness = 0.2;
-  c.envMapIntensity = 1.5;
-  c.onBeforeCompile = (shader) => {
+// ——— Object-space surfaces: things that move (weapons, gear, cars, street props, the chest, the bus) ———
+// Same texture sets as the world, projected triplanar in the object's own axes (in metres, whatever the model's
+// scale), so a gun's grain stays on the gun as it moves and every car of a batch keeps its own. On top of the
+// texture: per-pixel classes for Kenney colour-atlas models (tyres, glass, chrome, paint), road grime near the
+// ground, and roughness/metalness from the texture's AO/roughness/metal map around the class's own values.
+// Mean AO / roughness / metal of each `_arm` map (measured offline), so the texture varies around a target.
+const ARM_MEAN = {
+  metal: [0.871, 0.588, 0.384],
+  oak: [0.973, 0.529, 0.024],
+  concrete: [0.89, 0.784, 0.008],
+  fabric: [0.773, 0.659, 0.024],
+  asphalt: [0.722, 0.769, 0.02],
+  corrugated: [0.863, 0.522, 0.2],
+  wood: [0.984, 0.376, 0.008],
+  rock: [0.929, 0.635, 0.008],
+  pinebark: [0.859, 0.706, 0.012],
+  plaster: [0.957, 0.918, 0.004],
+  panels: [0.969, 0.737, 0.004],
+  steel: [0.996, 0.365, 0.992],
+  gunmetal: [0.992, 0.302, 0.996],
+  worn: [0.992, 0.353, 0.824],
+};
+// classify: 0 none · 1 car (tyres, glass, chrome, trim, paint) · 2 prop (rubber, bare metal, brass, paint) ·
+// 3 colour-atlas weapon (muted coatings, steel, polymer)
+const SURF_DEFAULTS = { surface: 'steel', size: 0.4, albedo: 0, tint: 1, strength: 0.45, normal: 0.6, roughVar: 0.6, classify: 0, grime: null, glass: 1, accent: false, glow: 0 };
+const surfaceMaterials = new Set(); // WeakRefs, to recompile everything when the graphics preset changes
+function surfaceShader(material, o) {
+  const look = lookOf(o.surface);
+  return (shader) => {
+    surfaceMaterials.add(new WeakRef(material));
+    Object.assign(shader.uniforms, {
+      objMap: { value: texture(o.surface) },
+      objNormal: { value: texture(o.surface + '_n') || texture(o.surface) },
+      objArm: { value: texture(o.surface + '_arm') || texture(o.surface) },
+      objMean: { value: linear(TEXTURES[o.surface] || [128, 128, 128]) },
+      objArmMean: { value: new T.Vector3(...(ARM_MEAN[o.surface] || [0.9, 0.6, 0])) },
+      objScale: { value: 1 / o.size },
+      objStrength: { value: o.strength },
+      objAlbedo: { value: o.albedo },
+      objTint: { value: o.tint },
+      objNormalScale: { value: o.normal * look.normal },
+      objRoughVar: { value: o.roughVar },
+      objGrime: { value: new T.Vector3(...(o.grime || [0, 0, 0])) },
+      objGlass: { value: o.glass },
+      objGlow: { value: o.glow },
+    });
+    const lite = (liteSurfaces ? '#define OBJ_LITE\n' : '') + (o.accent ? '#define OBJ_ACCENT\n' : '');
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vObjPos;varying vec3 vObjN;varying vec3 vObjX;varying vec3 vObjY;varying vec3 vObjZ;')
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+        mat3 oBasis = mat3(modelMatrix);
+        #ifdef USE_INSTANCING
+          oBasis = oBasis * mat3(instanceMatrix);
+        #endif
+        vec3 oScale = max(vec3(length(oBasis[0]), length(oBasis[1]), length(oBasis[2])), vec3(1e-6));
+        vObjPos = transformed * oScale;
+        vObjN = objectNormal / oScale;
+        vObjX = oBasis[0] / oScale.x; vObjY = oBasis[1] / oScale.y; vObjZ = oBasis[2] / oScale.z;`,
+      );
     shader.fragmentShader = shader.fragmentShader
       .replace(
-        '#include <map_fragment>',
-        `#include <map_fragment>
-        float carLum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
-        float carTyre = 1.0 - smoothstep(0.035, 0.05, carLum);
-        float carGlass = (1.0 - carTyre) * (1.0 - smoothstep(0.08, 0.11, carLum)) * step(diffuseColor.r * 1.05, diffuseColor.b);`,
+        '#include <common>',
+        `#include <common>
+        ${lite}#define OBJ_CLASSIFY ${o.classify}
+        uniform sampler2D objMap;uniform sampler2D objNormal;uniform sampler2D objArm;uniform vec3 objMean;uniform vec3 objArmMean;
+        uniform float objScale;uniform float objStrength;uniform float objAlbedo;uniform float objTint;uniform float objNormalScale;
+        uniform float objRoughVar;uniform vec3 objGrime;uniform float objGlass;uniform float objGlow;
+        varying vec3 vObjPos;varying vec3 vObjN;varying vec3 vObjX;varying vec3 vObjY;varying vec3 vObjZ;
+        ${TRIPLANAR}`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+        vec3 oN = normalize(vObjN);
+        vec3 oP = vObjPos * objScale;
+        #ifdef OBJ_LITE
+          vec3 oAbs = abs(oN);
+          vec2 oUV = oAbs.x >= oAbs.y && oAbs.x >= oAbs.z ? oP.zy : oAbs.y >= oAbs.z ? oP.xz : oP.xy;
+          vec3 ot = texture2D(objMap, oUV).rgb;
+          vec3 oArm = objArmMean;
+        #else
+          vec3 oB = triBlend(oN);
+          vec3 ot = triSample(objMap, oP, oB);
+          vec3 oArm = triSample(objArm, oP, oB);
+        #endif
+        float oRough = roughness, oMetal = metalness, oTex = 1.0, oNormalK = 1.0, oGlassK = 0.0;
+        // Accent mode (chests): the instance colour paints only the accent parts (brass class) and makes them glow;
+        // everything else keeps the model's own colours.
+        vec3 oTint = vec3(1.0);
+        #if defined( OBJ_ACCENT ) && defined( USE_COLOR )
+          oTint = vColor.rgb;
+          diffuseColor.rgb /= max(vColor.rgb, vec3(1e-3));
+        #endif
+        vec3 oBase = diffuseColor.rgb;
+        float oAccent = 0.0;
+        #if OBJ_CLASSIFY > 0
+          // What the atlas colour is: very dark = rubber, light blue = glass (cars), grey = metal or trim, else paint.
+          vec3 oS = sqrt(max(oBase, 0.0));
+          float oMax = max(oS.r, max(oS.g, oS.b)), oMin = min(oS.r, min(oS.g, oS.b));
+          float oSat = (oMax - oMin) / max(oMax, 1e-3);
+          float oRubber = 1.0 - smoothstep(0.26, 0.3, oMax);
+          #if OBJ_CLASSIFY == 1
+            oGlassK = (1.0 - oRubber) * step(0.7, oS.r) * step(0.07, oS.b - oS.r) * step(oS.r, oS.g) * step(0.9, oS.b) * objGlass;
+          #endif
+          float oGrey = (1.0 - oRubber) * (1.0 - oGlassK) * (1.0 - smoothstep(0.14, 0.24, oSat));
+          // Brass fittings on props and weapons; a yellow car is paint (a taxi is not gold-plated).
+          float oBrass = OBJ_CLASSIFY == 1 ? 0.0 : (1.0 - oRubber) * (1.0 - oGlassK) * (1.0 - oGrey) * step(0.9, oS.r) * step(0.62, oS.g) * step(oS.b, 0.5);
+          float oPaint = max(0.0, 1.0 - oRubber - oGlassK - oGrey - oBrass);
+          float oLight = smoothstep(0.5, 0.7, oMax);
+          float oL = dot(oBase, vec3(0.2126, 0.7152, 0.0722));
+          #if OBJ_CLASSIFY == 1
+            // Car paint: less toy-like (a little darker and greyer), glossy and a touch metallic; light greys are
+            // chrome, darker blue-greys are black plastic trim; tyres are rubber; windows dark reflective glass.
+            vec3 paint = mix(vec3(oL), oBase, 0.82) * 0.72;
+            vec3 oGreyC = mix(vec3(oL), oBase, 0.2);
+            vec3 trim = mix(oGreyC * vec3(0.3, 0.3, 0.28), oGreyC * 0.95, oLight);
+            oBase = paint * oPaint + trim * oGrey + vec3(0.016) * oRubber + vec3(0.012, 0.016, 0.02) * oGlassK + oBase * vec3(0.9, 0.75, 0.45) * oBrass;
+            oRough = 0.34 * oPaint + mix(0.62, 0.22, oLight) * oGrey + 0.88 * oRubber + 0.07 * oGlassK + 0.3 * oBrass;
+            oMetal = 0.08 * oPaint + mix(0.0, 0.9, oLight) * oGrey + 0.9 * oBrass;
+            oTex = 0.25 * oPaint + mix(0.6, 0.3, oLight) * oGrey + 0.8 * oRubber + 0.9 * oBrass;
+            oNormalK = 0.15 * oPaint + 0.4 * oGrey + 0.8 * oRubber + 0.4 * oBrass;
+          #elif OBJ_CLASSIFY == 3
+            // Colour-atlas weapons: toy colours become muted coatings, greys steel, darks polymer.
+            vec3 coat = mix(vec3(oL), oBase, 0.35) * 0.55;
+            vec3 steel = vec3(oL) * mix(0.35, 0.9, oLight);
+            oBase = coat * oPaint + steel * oGrey + vec3(0.025) * oRubber + oBase * vec3(0.9, 0.72, 0.45) * oBrass;
+            oRough = 0.5 * oPaint + 0.38 * oGrey + 0.62 * oRubber + 0.3 * oBrass;
+            oMetal = 0.2 * oPaint + 0.85 * oGrey + 0.05 * oRubber + 0.95 * oBrass;
+            oTex = 0.6 * oPaint + 0.7 * oGrey + 0.6 * oRubber + 0.5 * oBrass;
+            oNormalK = 0.6 * oPaint + 0.7 * oGrey + 0.9 * oRubber + 0.4 * oBrass;
+          #else
+            // Props: painted or bare metal, brass fittings, rubber.
+            vec3 metal = mix(vec3(oL), oBase, 0.25) * 0.8;
+            oBase = mix(vec3(oL), oBase, 0.85) * 0.85 * oPaint + metal * oGrey + vec3(0.02) * oRubber + oBase * vec3(0.95, 0.8, 0.52) * oBrass;
+            oRough = 0.5 * oPaint + 0.42 * oGrey + 0.85 * oRubber + 0.3 * oBrass;
+            oMetal = 0.1 * oPaint + 0.7 * oGrey + 0.95 * oBrass;
+            oTex = 0.6 * oPaint + 0.8 * oGrey + 0.7 * oRubber + 0.7 * oBrass;
+            oNormalK = 0.6 * oPaint + 0.9 * oGrey + 0.7 * oRubber + 0.6 * oBrass;
+          #endif
+          #ifdef OBJ_ACCENT
+            oAccent = oBrass;
+            oBase = mix(oBase, oTint * 0.8, oAccent);
+          #endif
+        #endif
+        // Painted: the class colour with the texture's grain. Natural: the texture's own colour, lightly tinted.
+        vec3 oPainted = oBase * mix(vec3(1.0), clamp(ot / objMean, 0.0, 2.2), objStrength * oTex);
+        vec3 oNatural = ot * mix(vec3(1.0), oBase, objTint);
+        diffuseColor.rgb = mix(oPainted, oNatural, objAlbedo);
+        // Road dirt: darker and browner towards the ground.
+        float oDirt = objGrime.z * (1.0 - smoothstep(objGrime.x, objGrime.y, vObjPos.y)) * (1.0 - oGlassK);
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.5, 0.45, 0.38) + vec3(0.012, 0.01, 0.007), oDirt);
+        float oAO = mix(1.0, oArm.r / max(objArmMean.r, 0.05), 0.6);`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
-        roughnessFactor = mix(mix(roughnessFactor, 0.9, carTyre), 0.04, carGlass);`,
+        roughnessFactor = clamp(oRough + (oArm.g - objArmMean.g) * objRoughVar * oTex + oDirt * 0.35, 0.03, 1.0);`,
       )
       .replace(
         '#include <metalnessmap_fragment>',
         `#include <metalnessmap_fragment>
-        metalnessFactor *= 1.0 - carTyre;
-        metalnessFactor = mix(metalnessFactor, 0.0, carGlass);`,
+        metalnessFactor = clamp(oMetal * (1.0 - oDirt * 0.6), 0.0, 1.0);`,
+      )
+      .replace(
+        '#include <aomap_fragment>',
+        `#include <aomap_fragment>
+        reflectedLight.indirectDiffuse *= oAO;
+        #ifdef OBJ_ACCENT
+          totalEmissiveRadiance += oTint * oAccent * objGlow;
+        #endif
+        reflectedLight.indirectSpecular *= mix(1.0, oAO, 0.6) * (1.0 - oGlassK * 0.35);`,
+      )
+      .replace(
+        '#include <normal_fragment_maps>',
+        `#include <normal_fragment_maps>
+        #ifndef OBJ_LITE
+        if (objNormalScale * oNormalK > 0.001) {
+          vec3 nX = texture2D(objNormal, oP.zy).xyz * 2.0 - 1.0;
+          vec3 nY = texture2D(objNormal, oP.xz).xyz * 2.0 - 1.0;
+          vec3 nZ = texture2D(objNormal, oP.xy).xyz * 2.0 - 1.0;
+          float k = objNormalScale * oNormalK;
+          nX.xy *= k; nY.xy *= k; nZ.xy *= k;
+          nX = vec3(nX.xy + oN.zy, abs(nX.z) * oN.x);
+          nY = vec3(nY.xy + oN.xz, abs(nY.z) * oN.y);
+          nZ = vec3(nZ.xy + oN.xy, abs(nZ.z) * oN.z);
+          vec3 objN = normalize(nX.zyx * oB.x + nY.xzy * oB.y + nZ.xyz * oB.z);
+          vec3 worldN = normalize(vObjX * objN.x + vObjY * objN.y + vObjZ * objN.z);
+          normal = normalize((viewMatrix * vec4(worldN, 0.0)).xyz) * faceDirection;
+        }
+        #endif`,
       );
   };
-  c.customProgramCacheKey = () => 'prida-car';
+}
+// Turns a MeshStandardMaterial into an object-space surface (in place) and returns it. `spec` overrides
+// SURF_DEFAULTS; the material's own colour, roughness and metalness are the targets. Clones (weapon finishes)
+// keep the look through copySurface().
+export function objectSurface(material, spec = {}) {
+  const o = { ...SURF_DEFAULTS, ...spec };
+  if (!texture(o.surface)) return material;
+  material.userData.surface = o;
+  material.onBeforeCompile = surfaceShader(material, o);
+  material.customProgramCacheKey = () => 'objsurf:' + o.classify + (o.accent ? ':accent' : '') + (liteSurfaces ? ':lite' : '');
+  material.needsUpdate = true;
+  return material;
+}
+export function copySurface(from, to) {
+  if (from.userData?.surface) objectSurface(to, from.userData.surface);
+  return to;
+}
+function refreshSurfaces() {
+  for (const ref of surfaceMaterials) {
+    const m = ref.deref();
+    if (m) m.needsUpdate = true;
+    else surfaceMaterials.delete(ref);
+  }
+}
+// Weapons and gear are flat-coloured low-poly models: every material becomes a real finish. Named materials of
+// the Quaternius guns map directly; the unnamed colours of the Kenney kits are sorted by hue and brightness.
+const GUN_FINISHES = {
+  steel: { color: 0x585b61, roughness: 0.4, metalness: 0.8, surface: 'gunmetal', size: 0.12, strength: 0.55, normal: 0.7, finishable: true },
+  darksteel: { color: 0x3b3d42, roughness: 0.34, metalness: 0.85, surface: 'gunmetal', size: 0.12, strength: 0.5, normal: 0.6, finishable: true },
+  polymer: { color: 0x2c2d30, roughness: 0.62, metalness: 0.04, surface: 'gunmetal', size: 0.05, strength: 0.4, normal: 0.9, finishable: true },
+  rubber: { color: 0x1b1b1c, roughness: 0.85, metalness: 0, surface: 'worn', size: 0.08, strength: 0.3, normal: 0.5 },
+  wood: { color: 0x7a4a2a, roughness: 0.52, metalness: 0, surface: 'oak', size: 0.32, albedo: 0.85, tint: 0.62, strength: 0.8, normal: 0.6 },
+  darkwood: { color: 0x4a2d1a, roughness: 0.55, metalness: 0, surface: 'oak', size: 0.32, albedo: 0.85, tint: 0.75, strength: 0.8, normal: 0.6 },
+  bright: { color: 0xc4c7cc, roughness: 0.22, metalness: 1, surface: 'steel', size: 0.15, strength: 0.4, normal: 0.4 },
+  brass: { color: 0xc49a55, roughness: 0.3, metalness: 0.95, surface: 'steel', size: 0.15, strength: 0.3, normal: 0.3 },
+  paint: { roughness: 0.46, metalness: 0.15, surface: 'steel', size: 0.25, strength: 0.35, normal: 0.4, finishable: true },
+};
+const GUN_NAMES = { Grey: 'steel', Grey2: 'darksteel', DarkGrey: 'polymer', Black: 'rubber', Wood: 'wood', DarkWood: 'darkwood', LightGrey: 'bright', Red: 'paint', Main: 'paint' };
+export function gunFinishOf(m) {
+  if (GUN_NAMES[m.name]) return GUN_NAMES[m.name];
+  if (m.map) return 'atlas';
+  const hsl = m.color.clone().convertLinearToSRGB().getHSL({}, T.LinearSRGBColorSpace);
+  if (hsl.l < 0.12) return hsl.l < 0.05 ? 'rubber' : 'polymer';
+  if (hsl.s < 0.22) return hsl.l < 0.32 ? 'polymer' : hsl.l > 0.72 ? 'bright' : hsl.l > 0.45 ? 'steel' : 'darksteel';
+  const hue = hsl.h * 360;
+  if (hue > 15 && hue < 45 && hsl.l < 0.45) return hsl.l < 0.32 ? 'darkwood' : 'wood';
+  if (hue > 25 && hue < 50 && hsl.s > 0.6 && hsl.l > 0.35 && hsl.l < 0.62) return 'brass';
+  return 'paint';
+}
+export function gunMaterial(m) {
+  if (m.userData.gunFinish) return m;
+  const kind = gunFinishOf(m),
+    out = m.clone();
+  out.userData.gunFinish = kind;
+  if (kind === 'atlas') return objectSurface(Object.assign(out, { roughness: 0.5, metalness: 0.3 }), { surface: 'gunmetal', size: 0.12, strength: 0.5, normal: 0.7, classify: 3 });
+  const f = GUN_FINISHES[kind];
+  if (f.color !== undefined) out.color.setHex(f.color);
+  else {
+    // Paint: the model's colour, a little deeper and less toy-bright.
+    const hsl = out.color.getHSL({});
+    out.color.setHSL(hsl.h, hsl.s * 0.8, hsl.l * 0.75);
+  }
+  out.roughness = f.roughness;
+  out.metalness = f.metalness;
+  out.envMapIntensity = 1;
+  out.userData.finishable = !!f.finishable;
+  return objectSurface(out, { surface: f.surface, size: f.size, strength: f.strength, normal: f.normal, albedo: f.albedo || 0, tint: f.tint ?? 1 });
+}
+// Kenney car kit bodies (one colour-atlas texture): glossy paint, dark reflective glass, chrome and rubber, grime
+// towards the road.
+const carCache = new Map();
+export function carMaterial(m) {
+  if (carCache.has(m.uuid)) return carCache.get(m.uuid);
+  const c = objectSurface(Object.assign(m.clone(), { roughness: 0.3, metalness: 0.2, envMapIntensity: 1 }), {
+    surface: 'steel',
+    size: 0.8,
+    strength: 0.3,
+    normal: 0.5,
+    classify: 1,
+    grime: [0.05, 0.6, 0.55],
+  });
   carCache.set(m.uuid, c);
   return c;
 }
-// Street furniture from the same kits: painted metal.
+// Street furniture from the same kits: concrete barriers, painted or bare metal, plastic cones, wooden poles.
+const PROP_SURFACES = {
+  barrier: { surface: 'concrete', size: 1.1, albedo: 0.92, tint: 0.12, strength: 0.8, normal: 1, grime: [0, 0.4, 0.4], roughness: 0.85, metalness: 0 },
+  cone: { surface: 'concrete', size: 0.25, strength: 0.15, normal: 0.25, classify: 2, grime: [0, 0.12, 0.5], roughness: 0.55, metalness: 0 },
+  'power-pole': { surface: 'oak', size: 0.9, albedo: 0.9, tint: 0.35, strength: 0.8, normal: 0.8, roughness: 0.8, metalness: 0, color: 0x6b5442 },
+  dumpster: { surface: 'worn', size: 1, strength: 0.6, normal: 0.8, classify: 2, grime: [0, 0.7, 0.6] },
+};
 const streetCache = new Map();
-export function streetMaterial(m) {
-  if (streetCache.has(m.uuid)) return streetCache.get(m.uuid);
-  const c = m.clone();
-  c.roughness = 0.5;
-  c.metalness = 0.35;
-  c.envMapIntensity = 1.1;
-  streetCache.set(m.uuid, c);
+export function streetMaterial(m, model = '') {
+  const key = m.uuid + ':' + model;
+  if (streetCache.has(key)) return streetCache.get(key);
+  const spec = PROP_SURFACES[model] || { surface: 'steel', size: 0.8, strength: 0.5, normal: 0.7, classify: 2, grime: [0, 0.5, 0.45] },
+    c = Object.assign(m.clone(), { roughness: spec.roughness ?? 0.5, metalness: spec.metalness ?? 0.35, envMapIntensity: 1.1 });
+  if (spec.color !== undefined) c.color.setHex(spec.color);
+  objectSurface(c, spec);
+  streetCache.set(key, c);
   return c;
 }
