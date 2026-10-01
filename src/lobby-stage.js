@@ -2,6 +2,7 @@
 // right of the menu (in the middle on narrow screens). The character is drawn by the normal person code in
 // render.js — main.js puts one player on the spot — so everything worn or held in a match shows here the same way:
 // skin, uniform tint, headgear, weapon colour, pattern and charm, gear, emotes.
+import './lobby-ui.js';
 import * as T from 'three';
 import { MAP_SIZES, mapSize } from './world.js';
 import { objectSurface } from './materials.js';
