@@ -33,6 +33,103 @@ export function roofStyle(b) {
 }
 // Height you stand on when on the roof (the top of the collision box above the last storey).
 export const roofTop = (b) => (b.height - b.roofBase > 0.3 ? b.height : b.roofBase);
+// Smokestack of the big industrial buildings (the chimney smoke rises from its top).
+export function chimneyOf(b) {
+  if (b.category !== 'industry' || b.height < 9) return null;
+  return { x: b.x + b.w * 0.25, z: b.z - b.d * 0.2, base: b.roofBase, top: roofTop(b) + 6 + (b.id % 3) * 1.5, r: 0.85 };
+}
+// What stands on a roof (0.28): the parapet, stair housing, air-conditioning units, water tanks, skylights, antennas
+// and vents of flat roofs, the chimney through a pitched roof, the smokestack of big works. One plan per building,
+// from its own random stream: roofs.js draws it and createWorld gives every piece a collision box (roofPlantBoxes),
+// so it is the same on every client and on the server.
+export function roofPlan(b) {
+  const rnd = seededRandom(0x51f15e + b.id * 977),
+    style = roofStyle(b),
+    plan = { style, items: [], stack: chimneyOf(b) };
+  if (style === 'gable' || style === 'hip') {
+    plan.shade = 0.82 + rnd() * 0.22;
+    if (rnd() < 0.85) {
+      const along = b.w >= b.d,
+        L = along ? b.w : b.d,
+        S = along ? b.d : b.w,
+        run = S / 2 + 0.45,
+        u = (rnd() - 0.5) * L * 0.5,
+        v = (rnd() < 0.5 ? -1 : 1) * run * 0.35,
+        ye = b.roofBase - 0.02,
+        yr = Math.max(b.height, ye + 1.2);
+      plan.chimney = { x: along ? b.x + u : b.x + v, z: along ? b.z + v : b.z + u, base: ye, top: yr + 0.7 };
+    }
+    return plan;
+  }
+  if (style !== 'flat') return plan;
+  plan.gravel = 0.9 + rnd() * 0.2;
+  const w = b.w,
+    d = b.d,
+    free = [],
+    step = 3.2;
+  for (let x = -w / 2 + 2.2; x <= w / 2 - 2.2; x += step)
+    for (let z = -d / 2 + 2.2; z <= d / 2 - 2.2; z += step) free.push([b.x + x, b.z + z]);
+  for (let i = free.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [free[i], free[j]] = [free[j], free[i]];
+  }
+  const stack = plan.stack,
+    take = () => {
+      while (free.length) {
+        const s = free.pop();
+        // Clear of the smokestack and of a roof chest.
+        if ((!stack || Math.hypot(s[0] - stack.x, s[1] - stack.z) > 3) && (!b.roofChest || Math.hypot(s[0] - b.roofChest.x, s[1] - b.roofChest.z) > 2.6)) return s;
+      }
+      return null;
+    };
+  // Stair and lift housing on taller buildings.
+  if ((b.storeys || 0) >= 3) {
+    const s = take();
+    if (s) plan.items.push({ kind: 'housing', x: s[0], z: s[1] });
+  }
+  const units = 1 + Math.floor(rnd() * 3 + Math.min(3, (w * d) / 160));
+  for (let i = 0; i < units; i++) {
+    const s = take();
+    if (!s) break;
+    const kind = rnd();
+    if (kind < 0.55) plan.items.push({ kind: 'ac', x: s[0], z: s[1], rot: rnd() < 0.5 });
+    else if (kind < 0.75) plan.items.push({ kind: 'tank', x: s[0], z: s[1] });
+    else if (kind < 0.9) plan.items.push({ kind: 'skylight', x: s[0], z: s[1] });
+    else plan.items.push({ kind: 'antenna', x: s[0], z: s[1] });
+  }
+  for (let i = 0; i < 3; i++) {
+    const s = take();
+    if (!s) break;
+    plan.items.push({ kind: 'vent', x: s[0] + (rnd() - 0.5), z: s[1] + (rnd() - 0.5), h: 0.7 + rnd() * 0.6 });
+  }
+  return plan;
+}
+// Parapet height and wall thickness of a flat roof (coping included in the height).
+export const PARAPET = { h: 0.93, t: 0.37 };
+// Collision boxes of a roof plan: {x, y (centre), z, w, h, d}.
+export function roofPlantBoxes(b, plan = roofPlan(b)) {
+  const out = [],
+    box = (x, y0, z, w, h, d) => out.push({ x, y: y0 + h / 2, z, w, h, d });
+  if (plan.style === 'flat') {
+    const deck = roofTop(b),
+      { h, t } = PARAPET;
+    box(b.x, deck, b.z + b.d / 2 - t / 2 + 0.06, b.w + 0.12, h, t);
+    box(b.x, deck, b.z - b.d / 2 + t / 2 - 0.06, b.w + 0.12, h, t);
+    box(b.x + b.w / 2 - t / 2 + 0.06, deck, b.z, t, h, b.d - 2 * t + 0.24);
+    box(b.x - b.w / 2 + t / 2 - 0.06, deck, b.z, t, h, b.d - 2 * t + 0.24);
+    for (const it of plan.items) {
+      if (it.kind === 'housing') box(it.x, deck, it.z, 2.8, 2.9, 3.2);
+      else if (it.kind === 'ac') box(it.x, deck, it.z, it.rot ? 1.4 : 2.0, 1.16, it.rot ? 2.0 : 1.4);
+      else if (it.kind === 'tank') box(it.x, deck, it.z, 2.3, 3.1, 2.3);
+      else if (it.kind === 'skylight') box(it.x, deck, it.z, 1.8, 0.65, 2.4);
+      else if (it.kind === 'antenna') box(it.x, deck, it.z, 0.16, 4.2, 0.16);
+      else if (it.kind === 'vent') box(it.x, deck, it.z, 0.26, it.h, 0.26);
+    }
+  }
+  if (plan.chimney) box(plan.chimney.x, plan.chimney.base, plan.chimney.z, 0.86, plan.chimney.top + 0.1 - plan.chimney.base, 0.86);
+  if (plan.stack) box(plan.stack.x, plan.stack.base, plan.stack.z, (plan.stack.r + 0.12) * 2, plan.stack.top - plan.stack.base, (plan.stack.r + 0.12) * 2);
+  return out;
+}
 export function seededRandom(seed) {
   let n = seed >>> 0;
   return () => {
@@ -629,6 +726,11 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     for (let z = -map.limit.z; z <= map.limit.z; z += 2) top = Math.max(top, rawHeight(x, z, map));
   map.maxTerrainHeight = top + 0.1;
   placeDecor(map, keepOut, seededRandom(seed ^ 0x2545f491), levelKeepOut);
+  // Everything on the roofs is solid (0.28): parapets, plant, chimneys and smokestacks stop players, bullets and the
+  // camera. They go with the roof when it is blown off or the building comes down.
+  for (const b of buildings)
+    for (const r of roofPlantBoxes(b))
+      obstacles.push({ ...r, part: 'roofplant', building: b.id, storey: (b.storeys || 0) + 1, color: 0x9aa0a4 });
   for (const p of plots) delete p.kind;
   map.obstacles.grid = new ObstacleGrid(map.obstacles, map.limit);
   map.obstacles.lowGrid = new ObstacleGrid(map.obstacles.filter(isLowSolid), map.limit, 8, '_lowStamp');
