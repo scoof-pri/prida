@@ -2,11 +2,8 @@ import * as T from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { WEAPONS, GEAR } from './catalog.js';
 import { DECOR_SIZES } from './decor-sizes.js';
-import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import { OPERATOR_FILES, prepareOperators } from './soldier.js';
 import { gunMaterial } from './materials.js';
-// Players and bots (0.27.1, back from 0.21): Quaternius' Toon Shooter soldiers with their own clips and the guns
-// that ship in their right hands. (0.22–0.27 used combat operators, soldier.js; see PRIDA-BASELINE §7.13.)
-export const CHARACTER_FILES = ['soldier', 'hazmat', 'scout'];
 const models = new Map(),
   textures = new Map();
 // CC0 Poly Haven PBR sets (see ASSET-CREDITS.md): colour map, OpenGL normal map (_n) and AO/roughness/metal map
@@ -128,7 +125,12 @@ async function loadTextures(done) {
       t.wrapS = t.wrapT = card ? T.ClampToEdgeWrapping : T.RepeatWrapping;
       // Normal and AO/roughness maps hold data, not colour.
       t.colorSpace = /_(n|arm)$/.test(name) ? T.NoColorSpace : T.SRGBColorSpace;
-      t.anisotropy = 4;
+      t.generateMipmaps = true;
+      if (!card) {
+        t.minFilter = T.LinearMipmapLinearFilter;
+        t.magFilter = T.LinearFilter;
+      }
+      t.anisotropy = 8;
       textures.set(name, t);
       done();
     }),
@@ -169,7 +171,7 @@ export async function loadAssets(progress = () => {}) {
       ...WEAPONS.map((w) => w.model),
       ...GEAR.map((g) => g.model),
       ...Object.keys(DECOR_SIZES).map((n) => 'decor-' + n),
-      ...CHARACTER_FILES,
+      ...OPERATOR_FILES,
       'chest',
     ]),
   ];
@@ -205,31 +207,13 @@ export async function loadAssets(progress = () => {}) {
       }
     }),
   ]);
-  // Weapons and gear: flat colours become steel, polymer, wood, rubber and paint finishes (materials.js) — the
-  // guns in the soldiers' hands too (they are the same models the first-person weapons were cut from).
-  const finish = (o) => {
-    if (o.isMesh) o.material = Array.isArray(o.material) ? o.material.map(gunMaterial) : gunMaterial(o.material);
-  };
-  for (const name of new Set([...WEAPONS.map((w) => w.model), ...GEAR.map((g) => g.model)])) models.get(name)?.scene.traverse(finish);
-  for (const name of CHARACTER_FILES)
+  // Combat operators: every clip retargeted onto both bodies, hands calibrated (soldier.js).
+  prepareOperators((name) => models.get(name));
+  // Weapons and gear: flat colours become steel, polymer, wood, rubber and paint finishes (materials.js).
+  for (const name of new Set([...WEAPONS.map((w) => w.model), ...GEAR.map((g) => g.model)]))
     models.get(name)?.scene.traverse((o) => {
-      if (ALL_CHARACTER_GUNS.includes(o.name)) o.traverse(finish);
+      if (o.isMesh) o.material = Array.isArray(o.material) ? o.material.map(gunMaterial) : gunMaterial(o.material);
     });
-}
-// A soldier (0 soldier, 1 hazmat, 2 scout) with its own skeleton, and its animation mixer and clips.
-export function character(index = 0) {
-  const a = models.get(CHARACTER_FILES[((index % 3) + 3) % 3]),
-    root = cloneSkeleton(a.scene),
-    mixer = new T.AnimationMixer(root);
-  root.scale.setScalar(0.88);
-  return { model: root, mixer, clips: a.animations };
-}
-// Weapon nodes that ship attached to the soldiers' right hands. Everything else is mounted there at runtime.
-export const ALL_CHARACTER_GUNS = ['AK', 'GrenadeLauncher', 'Knife_1', 'Knife_2', 'Pistol', 'Revolver', 'Revolver_Small', 'RocketLauncher', 'ShortCannon', 'Shotgun', 'Shovel', 'SMG', 'Sniper', 'Sniper_2'];
-// The node a weapon shows as in a soldier's hand (null: bare hands).
-export function characterGun(w) {
-  if (!w || w.fists) return null;
-  return ALL_CHARACTER_GUNS.includes(w.char) ? w.char : 'Mount_' + w.model;
 }
 export function modelAsset(name) {
   return models.get(name) || null;

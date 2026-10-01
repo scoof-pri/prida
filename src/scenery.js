@@ -383,18 +383,40 @@ export class Scenery {
         linkW(curtainB, curtainB.add(place(x, w.y - 0.05, z, rot, w.w * 0.3, h + 0.35, 0.05), color, detail));
       }
     });
-    // Open door leaves swung back against the inside of the wall, in a painted timber frame.
-    const doorB = batch('door', unitBox, detailMaterial('oak', 0xffffff, { box: true, roughness: 0.6, key: 'door' }), { colors: true });
+    // Door leaves, frames and thresholds: outer doors are open to the street, flat/corridor doors sit in the
+    // partition openings so interiors read as rooms instead of open cut-outs.
+    const doorB = batch('door', unitBox, detailMaterial('oak', 0xffffff, { box: true, roughness: 0.58, key: 'door' }), { colors: true }),
+      doorFrameB = batch('door-frame', unitBox, detailMaterial('plaster', 0xf1ece2, { box: true, roughness: 0.82, key: 'door-frame' }), { colors: true }),
+      thresholdB = batch('door-threshold', unitBox, detailMaterial('oak', 0xffffff, { box: true, roughness: 0.64, key: 'threshold' }), { colors: true });
     for (const d of map.doors) {
       const b = map.buildings[d.building],
-        leaf = d.w / 2 - 0.05,
-        group = culler.detail(d.building);
-      [-1, 1].forEach((s, k) => {
-        const x = d.x + s * (d.w / 2 + leaf / 2 - 0.05),
-          z = d.z - d.face * 0.26,
-          i = doorB.add(place(x, 1.3, z, s * d.face * 0.18, leaf, 2.55, 0.06), b.accent, group);
-        link(this.byPanel, d.panels[k], doorB, i);
-      });
+        axis = d.axis || 'x',
+        alongZ = axis === 'z',
+        h = d.h || 2.55,
+        y = d.y || 1.3,
+        t = d.thickness || 0.06,
+        frameT = alongZ ? 0.14 : 0.12,
+        leafCount = d.kind === 'inner' || d.w < 1.45 ? 1 : 2,
+        gap = leafCount === 1 ? 0.08 : 0.1,
+        leaf = Math.max(0.62, d.w / leafCount - gap),
+        group = d.kind === 'inner' ? room(d.building, d.storey) : culler.detail(d.building),
+        frameColor = d.kind === 'inner' ? 0xf4efe6 : 0xe9e2d5,
+        doorColor = d.color || (d.kind === 'inner' ? 0xc8b28e : b.accent);
+      const frame = (x, yy, z, w, hh, depth) => doorFrameB.add(place(x, yy, z, alongZ ? Math.PI / 2 : 0, w, hh, depth), frameColor, group);
+      // Jambs and head.
+      frame(d.x + (alongZ ? -d.face * 0.04 : -d.w / 2 - 0.05), y, d.z + (alongZ ? -d.w / 2 - 0.05 : -d.face * 0.04), 0.1, h, frameT);
+      frame(d.x + (alongZ ? -d.face * 0.04 : d.w / 2 + 0.05), y, d.z + (alongZ ? d.w / 2 + 0.05 : -d.face * 0.04), 0.1, h, frameT);
+      frame(d.x + (alongZ ? -d.face * 0.04 : 0), y + h / 2 + 0.05, d.z + (alongZ ? 0 : -d.face * 0.04), d.w + 0.2, 0.1, frameT);
+      thresholdB.add(place(d.x, y - h / 2 + 0.02, d.z, alongZ ? Math.PI / 2 : 0, d.w + 0.08, 0.04, Math.max(0.1, t + 0.02)), doorColor, group);
+      for (let k = 0; k < leafCount; k++) {
+        const s = leafCount === 1 ? 1 : k === 0 ? -1 : 1,
+          off = leafCount === 1 ? 0 : s * (d.w / 2 - leaf / 2 - 0.05),
+          x = d.x + (alongZ ? -d.face * 0.27 : off),
+          z = d.z + (alongZ ? off : -d.face * 0.27),
+          rot = alongZ ? Math.PI / 2 - s * d.face * 0.24 : s * d.face * 0.24,
+          i = doorB.add(place(x, y, z, rot, leaf, h, t), doorColor, group);
+        if (d.panels?.[k] !== undefined) link(this.byPanel, d.panels[k], doorB, i);
+      }
     }
     // Furniture, street furniture and cars.
     const wood = detailMaterial('oak', 0xffffff, { box: true, roughness: 0.7, key: 'crate' });

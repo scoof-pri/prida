@@ -17,17 +17,17 @@ export const WORLD = {
 //   look.normal  strength of the normal map.   look.metal  how much the texture's metal channel counts.
 const LOOKS = {
   bricks: { size: 1.8, albedo: 1, tint: 0.28, normal: 1.15 },
-  plaster: { size: 2.4, albedo: 0, tint: 1, normal: 0.8 },
-  concrete: { size: 3, albedo: 0.55, tint: 0.7, normal: 0.9 },
+  plaster: { size: 1.35, albedo: 0.08, tint: 0.95, normal: 1.05 },
+  concrete: { size: 1.7, albedo: 0.62, tint: 0.62, normal: 1.05 },
   asphalt: { size: 4, albedo: 0.85, tint: 0.3, normal: 1 },
   paving: { size: 2, albedo: 0.8, tint: 0.35, normal: 1.1 },
   sidewalk: { size: 3, albedo: 0.85, tint: 0.3, normal: 1.1 },
   dirt: { size: 3, albedo: 0.9, tint: 0.2, normal: 1 },
-  tiles: { size: 2, albedo: 0.85, tint: 0.35, normal: 0.8 },
-  wood: { size: 2, albedo: 0.8, tint: 0.45, normal: 0.8 },
-  oak: { size: 1.4, albedo: 0.35, tint: 0.8, normal: 0.6 },
-  roof: { size: 2.4, albedo: 0.9, tint: 0.3, normal: 1.2 },
-  claytiles: { size: 2.2, albedo: 1, tint: 0.25, normal: 1.25 },
+  tiles: { size: 0.85, albedo: 0.92, tint: 0.24, normal: 1.08 },
+  wood: { size: 1.05, albedo: 0.86, tint: 0.35, normal: 0.95 },
+  oak: { size: 0.82, albedo: 0.48, tint: 0.72, normal: 0.9 },
+  roof: { size: 1.75, albedo: 0.94, tint: 0.24, normal: 1.3 },
+  claytiles: { size: 1.3, albedo: 1, tint: 0.2, normal: 1.32 },
   corrugated: { size: 2.2, albedo: 0.5, tint: 0.7, normal: 1.4, metal: 0.6 },
   gravel: { size: 2.6, albedo: 0.9, tint: 0.3, normal: 1 },
   metal: { size: 1, albedo: 0.6, tint: 0.6, normal: 1, metal: 1 },
@@ -35,7 +35,7 @@ const LOOKS = {
   pinebark: { size: 1.2, albedo: 0.95, tint: 0.3, normal: 1.3 },
   rock: { size: 3, albedo: 0.9, tint: 0.45, normal: 1.3 },
   fabric: { size: 0.7, albedo: 0, tint: 1, normal: 0.9 },
-  panels: { size: 3.6, albedo: 0.55, tint: 0.7, normal: 0.9 },
+  panels: { size: 1.8, albedo: 0.65, tint: 0.56, normal: 1.06 },
   grass: { size: 3, albedo: 0.9, tint: 0.3, normal: 1 },
   sand: { size: 4, albedo: 0.9, tint: 0.3, normal: 1 },
   steel: { size: 0.6, albedo: 0.4, tint: 0.7, normal: 1, metal: 1 },
@@ -95,7 +95,7 @@ export function uvMaterial(name, { roughness = 1, metalness = 0, env = 1 } = {})
       roughness,
       metalness: look.metal ? Math.max(metalness, 0.6) : metalness,
       envMapIntensity: env,
-      aoMapIntensity: 0.8,
+      aoMapIntensity: 1.0,
     });
   m.userData.surface = name;
   m.normalScale.set(look.normal, look.normal);
