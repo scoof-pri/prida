@@ -1,6 +1,6 @@
 {
   "name": "prida",
-  "version": "0.34.0",
+  "version": "0.35.0",
   "description": "",
   "main": "index.js",
   "directories": {
@@ -8,14 +8,18 @@
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "build": "vite build && node scripts/package-crazygames.mjs --serve",
     "start": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
     "build:hf": "node scripts/make-hf-space.mjs",
     "prebuild": "node prida-update.mjs",
     "predev": "node prida-update.mjs",
     "pretest": "node prida-update.mjs",
-    "prestart": "node prida-update.mjs"
+    "prestart": "node prida-update.mjs",
+    "build:crazygames": "node scripts/package-crazygames.mjs",
+    "build:crazygames:full": "node scripts/package-crazygames.mjs --full",
+    "prebuild:crazygames:full": "node prida-update.mjs",
+    "prebuild:crazygames": "node prida-update.mjs"
   },
   "keywords": [],
   "author": "",
