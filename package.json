@@ -1,6 +1,6 @@
 {
   "name": "prida",
-  "version": "0.37.0",
+  "version": "0.37.1",
   "description": "",
   "main": "index.js",
   "directories": {
@@ -12,14 +12,14 @@
     "start": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
     "build:hf": "node scripts/make-hf-space.mjs",
-    "prebuild": "node prida-update.mjs",
-    "predev": "node prida-update.mjs",
-    "pretest": "node prida-update.mjs",
-    "prestart": "node prida-update.mjs",
+    "prebuild": "node prida-network-fix.mjs && node prida-update.mjs",
+    "predev": "node prida-network-fix.mjs && node prida-update.mjs",
+    "pretest": "node prida-network-fix.mjs && node prida-update.mjs",
+    "prestart": "node prida-network-fix.mjs && node prida-update.mjs",
     "build:crazygames": "node scripts/package-crazygames.mjs",
     "build:crazygames:full": "node scripts/package-crazygames.mjs --full",
-    "prebuild:crazygames:full": "node prida-update.mjs",
-    "prebuild:crazygames": "node prida-update.mjs",
+    "prebuild:crazygames:full": "node prida-network-fix.mjs && node prida-update.mjs",
+    "prebuild:crazygames": "node prida-network-fix.mjs && node prida-update.mjs",
     "export:full": "node scripts/package-full.mjs"
   },
   "keywords": [],
