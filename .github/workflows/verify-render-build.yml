@@ -1,0 +1,58 @@
+name: Verify Render build
+
+on:
+  push:
+    branches: [main, fix/render-lift-snapshots-0371]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build with the production Dockerfile and all existing gates
+        run: docker build --progress=plain -t prida-verified .
+      - name: Start the built server and verify HTTP responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name prida-check -p 127.0.0.1:18080:8080 prida-verified
+          for i in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:18080/health > /tmp/prida-health.json; then break; fi
+            sleep 2
+          done
+          python3 - <<'PY'
+          import json
+          with open('/tmp/prida-health.json') as f:
+              health = json.load(f)
+          assert health.get('ok') is True, health
+          assert health.get('game') == 'PRIDA', health
+          print('Server health: OK')
+          PY
+          curl --fail --silent http://127.0.0.1:18080/ > /tmp/prida-index.html
+          grep -F '0.37.1' /tmp/prida-index.html > /dev/null
+          curl --fail --silent http://127.0.0.1:18080/PRIDA-CrazyGames-basic.zip > /tmp/prida-basic.zip
+          python3 - <<'PY'
+          import zipfile
+          with zipfile.ZipFile('/tmp/prida-basic.zip') as z:
+              assert 'index.html' in z.namelist()
+              assert z.testzip() is None
+              assert not any(n.endswith('server.mjs') for n in z.namelist())
+              print('CrazyGames client ZIP: valid,', len(z.namelist()), 'files')
+          PY
+      - name: Server logs and cleanup
+        if: always()
+        run: |
+          docker logs prida-check || true
+          docker rm -f prida-check || true
