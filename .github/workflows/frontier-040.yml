@@ -1,0 +1,26 @@
+name: Frontier integration
+on:
+  push:
+    branches: [feat/frontier-all-stages-040]
+    paths: ['.github/workflows/frontier-040.yml']
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install and verify the existing baseline
+        run: docker run --rm -v "$PWD:/app" -w /app node:22-bookworm-slim sh -c 'npm ci && npm run build'
+      - name: Package public source and reproducible dependency tree
+        run: |
+          tar czf "$RUNNER_TEMP/prida-baseline.tar.gz" src tests public scripts node_modules index.html package.json package-lock.json server.mjs accounts.mjs vite.config.js Dockerfile
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prida-verified-baseline
+          path: ${{ runner.temp }}/prida-baseline.tar.gz
+          retention-days: 3
+          compression-level: 0
