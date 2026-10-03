@@ -1,0 +1,33 @@
+name: Mobility QA
+on:
+  push:
+    branches: [feature/stage2-mobility-038]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build current production baseline
+        run: docker build --progress=plain -t prida-mobility-qa .
+      - name: Export reproducible test workspace without secrets or account data
+        run: |
+          set -euo pipefail
+          docker create --name prida-export prida-mobility-qa
+          mkdir -p qa-work
+          for item in src tests scripts public node_modules index.html package.json package-lock.json server.mjs accounts.mjs vite.config.js; do
+            docker cp prida-export:/app/$item qa-work/$item
+          done
+          docker rm prida-export
+          tar -czf prida-qa-workspace.tar.gz qa-work
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prida-reproducible-workspace
+          path: prida-qa-workspace.tar.gz
+          retention-days: 3
+          compression-level: 0
