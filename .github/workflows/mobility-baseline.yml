@@ -1,0 +1,35 @@
+name: Mobility baseline
+on:
+  push:
+    branches: [feature/mobility-038]
+    paths: [.github/workflows/mobility-baseline.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build unchanged production baseline
+        run: docker build --progress=plain -t prida-baseline .
+      - name: Export public source and installed runtime without secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/prida-artifacts /tmp/prida-built
+          tar --exclude='./.git' --exclude='./.github' --exclude='*.zip' --exclude='./.env*' --exclude='./data' -czf /tmp/prida-artifacts/source.tar.gz .
+          cid=$(docker create prida-baseline)
+          docker cp "$cid:/app/." /tmp/prida-built/
+          docker rm "$cid"
+          cd /tmp/prida-built
+          tar --exclude='./.git' --exclude='./.github' --exclude='./.prida-*' --exclude='./.env*' --exclude='./data' --exclude='./release' --exclude='*.zip' -czf /tmp/prida-artifacts/runtime.tar.gz .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mobility-baseline
+          path: /tmp/prida-artifacts/*.tar.gz
+          retention-days: 3
+          compression-level: 0
