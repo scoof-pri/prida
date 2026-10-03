@@ -2,7 +2,7 @@ name: Verify Render build
 
 on:
   push:
-    branches: [main, fix/render-lift-snapshots-0371]
+    branches: [main, 'fix/**']
   pull_request:
     branches: [main]
 
@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Check installer entrypoints and native lift recovery
+        run: node --test tests/build-entrypoints.test.mjs
       - name: Build with the production Dockerfile and all existing gates
         run: docker build --progress=plain -t prida-verified .
       - name: Start the built server and verify HTTP responses
@@ -41,7 +43,8 @@ jobs:
           print('Server health: OK')
           PY
           curl --fail --silent http://127.0.0.1:18080/ > /tmp/prida-index.html
-          grep -F '0.37.1' /tmp/prida-index.html > /dev/null
+          EXPECTED_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")
+          grep -F "$EXPECTED_VERSION" /tmp/prida-index.html > /dev/null
           curl --fail --silent http://127.0.0.1:18080/PRIDA-CrazyGames-basic.zip > /tmp/prida-basic.zip
           python3 - <<'PY'
           import zipfile
