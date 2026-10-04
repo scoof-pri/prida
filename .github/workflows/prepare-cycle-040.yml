@@ -1,0 +1,26 @@
+name: Prepare cycle 0.40 fixture
+on:
+  push:
+    branches: [feature/complete-cycle-040]
+    paths: [.github/workflows/prepare-cycle-040.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install exact locked packages and compose the existing release
+        run: |
+          npm ci --ignore-scripts
+          npm run build > /tmp/baseline-build.log 2>&1 || { tail -100 /tmp/baseline-build.log; exit 1; }
+          tar -czf /tmp/prida-cycle-fixture.tgz node_modules src tests scripts public package.json package-lock.json server.mjs accounts.mjs index.html vite.config.js
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prida-cycle-fixture
+          path: /tmp/prida-cycle-fixture.tgz
+          retention-days: 3
+          if-no-files-found: error
