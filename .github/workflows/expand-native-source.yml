@@ -1,0 +1,35 @@
+name: Expand verified native source
+on:
+  push:
+    branches: [feature/complete-frontier-040]
+    paths: [.github/workflows/expand-native-source.yml]
+permissions:
+  contents: write
+concurrency:
+  group: native-source-frontier
+  cancel-in-progress: false
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Expand the already verified 0.37.2 baseline
+        run: |
+          npm ci --ignore-scripts
+          node prida-build-recovery.mjs
+          node prida-update.mjs
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          const file='package.json',p=JSON.parse(fs.readFileSync(file));
+          for(const key of Object.keys(p.scripts)) if(key.startsWith('pre')&&p.scripts[key].includes('prida-update'))delete p.scripts[key];
+          p.description='PRIDA native source distribution';
+          fs.writeFileSync(file,JSON.stringify(p,null,2)+'\n');
+          NODE
+      - name: Commit expanded files only to the development branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src scripts public tests index.html server.mjs package.json package-lock.json
+          git diff --cached --quiet || git commit -m 'build: materialize verified native sources; retire automatic overlay hooks'
+          git push origin HEAD:feature/complete-frontier-040
