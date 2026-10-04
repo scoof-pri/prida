@@ -343,7 +343,7 @@ export class Nature {
     const treeProps = new Map(map.obstacles.filter((o) => o.part === 'tree').map((o) => [o.tree, o.prop]));
     const LEAF = [0xd8ecb0, 0xc6e4a0, 0xe8f0b8, 0xbad89a, 0xdce8a8],
       NEEDLE = [0xd0e6c8, 0xbfd8b8, 0xdcecd0];
-    for (const [i, [x, z, type]] of map.trees.entries()) {
+    for (const [i, [x, z, type]] of (map.treeEntries || map.trees.entries())) {
       const h = hash(x, z),
         y = groundHeight(x, z, map),
         s = 0.85 + h * 0.35,
@@ -383,13 +383,13 @@ export class Nature {
     const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
     for (const f of map.flora) {
       if (f.kind === 'grass') continue; // the 3D grass field covers it
-      const y = groundHeight(f.x, f.z, map);
+      const y = groundHeight(f.x, f.z, map) + (f.height034 || 0);
       if (f.kind !== 'reed' && map.waters.some((w) => w.lake && y < w.y + 0.05)) continue;
       const v = Math.floor(rnd() * 2),
         yaw = rnd() * 6.28,
         g = culler.outdoor(f.x, f.z),
         s = f.s;
-      if (f.kind === 'bush') add('bush:' + v, K.bush[v], leaves, at(f.x, y - 0.05, f.z, s * 1.1, yaw), 0xb8d49a, g, undefined, false);
+      if (f.kind === 'bush') add('bush:' + v, K.bush[v], leaves, at(f.x, y - 0.05, f.z, s * 1.1, yaw), 0xb8d49a, g, f.support034?.prop, false);
       else if (f.kind === 'shrub') add('shrub', K.shrub[0], needles, at(f.x, y - 0.05, f.z, s, yaw), 0xe0c890, g, undefined, false);
       else if (f.kind === 'fern') add('fern:' + v, K.fern[v], needles, at(f.x, y, f.z, s, yaw), 0xd4ecb0, g, undefined, false);
       else if (f.kind === 'reed') add('reed:' + v, K.reed[v], flowerMaterial(), at(f.x, y - 0.1, f.z, s, yaw), 0xffffff, g, undefined, false);

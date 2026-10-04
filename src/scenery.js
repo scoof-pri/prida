@@ -1,3 +1,7 @@
+import { EscalatorViews } from './escalator-view.js';
+import { LiftViews } from './lift-view.js';
+import { InteriorViews } from './interior-view.js';
+import { DoorViews } from './door-view.js';
 // The changeable part of the district: wall panels, windows with curtains, doors, furniture, street furniture,
 // cars and the roofs. Everything repeated is instanced, so hundreds of props cost a few draw calls; destroyed
 // items are hidden by zero-scaling their instance. Every instance belongs to a visibility group (culling.js):
@@ -144,6 +148,19 @@ export class CulledBatch {
       this.mesh.instanceMatrix.needsUpdate = true;
     }
   }
+  // Animated instances retain their CPU matrices even when culled out of the current GPU buffer.
+  setMatrix(i, matrix) {
+    if (this.items) { if(this.items[i])this.items[i].matrix.copy(matrix); return; }
+    if (!this.mesh || i < 0 || i >= this.pos.length) return;
+    const k = this.pos[i];
+    matrix.toArray(this.mat, k * 16);
+    const s = this.slot(i);
+    if (s >= 0) {
+      matrix.toArray(this.mesh.instanceMatrix.array, s * 16);
+      this.mesh.instanceMatrix.addUpdateRange(s * 16, 16);
+      this.mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
   tint(i, color) {
     if (!this.col) return;
     const c = new T.Color(color),
@@ -212,12 +229,12 @@ function outwardOf(o, b) {
 }
 
 export class Scenery {
-  constructor(scene, map) {
+  constructor(scene, map, sharedCuller = null) {
     this.map = map;
     this.root = new T.Group();
     this.root.name = 'scenery';
     scene.add(this.root);
-    this.culler = new Culler(map);
+    this.culler = sharedCuller || new Culler({ ...map, doors: map.doors.filter(d => d.kind !== 'inner') });
     this.batches = new Map();
     this.byPanel = new Map(); // panel id -> [{batch, index}]
     this.byDecor = new Map(); // decor id -> [{batch, index}]
@@ -260,7 +277,7 @@ export class Scenery {
       if (o.panel !== undefined && o.part !== 'roof') {
         if (!this.buildingPanels.has(o.building)) this.buildingPanels.set(o.building, []);
         this.buildingPanels.get(o.building).push(o.panel);
-        const key = o.part === 'partition' ? 'partition' : b ? facadeOf(b) : 'plaster',
+        const key = (o.part === 'partition' || o.interior033) ? 'partition' : b ? facadeOf(b) : 'plaster',
           out = key === 'partition' ? null : outwardOf(o, b),
           bt = batch(
             'wall:' + key,
@@ -311,7 +328,7 @@ export class Scenery {
         this.stairOf.set(o.prop, o);
         link(this.byProp, o.prop, bt, bt.add(place(o.x, o.y, o.z, 0, o.w, o.h, o.d), o.step % 2 ? 0xc4bdaf : 0xb3ac9e, room(o.building, o.storey)));
       } else if (o.part === 'roof') {
-        const bt = batch('roof', unitBox, detailMaterial('concrete', 0xffffff, { box: true, strength: 0.5, ceiling: true }), {
+        const bt = batch(o.surface034 ? 'roof:'+o.surface034 : 'roof', unitBox, detailMaterial(o.surface034 || 'concrete', 0xffffff, { box: true, strength: 0.5, ceiling: true }), {
             colors: true,
           }),
           // Floor slabs break cell by cell like walls (coarser cells). Pre-cut ones (stairwells) are drawn as the
@@ -324,7 +341,7 @@ export class Scenery {
           if (o.panel !== undefined) link(this.byPanel, o.panel, bt, index);
           this.slabs.get(o.building).push({ storey: o.storey || 0, batch: bt, index });
         }
-        if (o.panel !== undefined) this.wallOf.set(o.panel, { batch: bt, index: indices[0], indices, key: 'roof', matKey: 'roof', o, precut: !!o.cells });
+        if (o.panel !== undefined) this.wallOf.set(o.panel, { batch: bt, index: indices[0], indices, key: 'roof', matKey: o.surface034 ? 'roof:'+o.surface034 : 'roof', o, precut: !!o.cells });
       }
     }
     // Windows: frame and glass reach through the wall so both sides show; a stone sill outside, curtains inside.
@@ -343,7 +360,7 @@ export class Scenery {
     map.windows.forEach((w, i) => {
       const alongZ = w.axis === 'z',
         rot = alongZ ? Math.PI / 2 : 0,
-        h = 1.15,
+        h = w.h || 1.15,
         wall = panelOf.get(w.panel),
         b = wall ? map.buildings[wall.building] : null,
         group = wall ? shell(wall.building) : culler.outdoor(w.x, w.z),
@@ -376,51 +393,22 @@ export class Scenery {
       const color = CURTAINS[(i * 7 + w.panel) % CURTAINS.length],
         inX = alongZ ? -w.out * 0.52 : 0,
         inZ = alongZ ? 0 : -w.out * 0.52;
-      for (const s of [-1, 1]) {
+      if (w.curtains !== false) for (const s of [-1, 1]) {
         const off = s * (w.w / 2 - w.w * 0.12),
           x = w.x + inX + (alongZ ? 0 : off),
           z = w.z + inZ + (alongZ ? off : 0);
         linkW(curtainB, curtainB.add(place(x, w.y - 0.05, z, rot, w.w * 0.3, h + 0.35, 0.05), color, detail));
       }
     });
-    // Door leaves, frames and thresholds: outer doors are open to the street, flat/corridor doors sit in the
-    // partition openings so interiors read as rooms instead of open cut-outs.
-    const doorB = batch('door', unitBox, detailMaterial('oak', 0xffffff, { box: true, roughness: 0.58, key: 'door' }), { colors: true }),
-      doorFrameB = batch('door-frame', unitBox, detailMaterial('plaster', 0xf1ece2, { box: true, roughness: 0.82, key: 'door-frame' }), { colors: true }),
-      thresholdB = batch('door-threshold', unitBox, detailMaterial('oak', 0xffffff, { box: true, roughness: 0.64, key: 'threshold' }), { colors: true });
-    for (const d of map.doors) {
-      const b = map.buildings[d.building],
-        axis = d.axis || 'x',
-        alongZ = axis === 'z',
-        h = d.h || 2.55,
-        y = d.y || 1.3,
-        t = d.thickness || 0.06,
-        frameT = alongZ ? 0.14 : 0.12,
-        leafCount = d.kind === 'inner' || d.w < 1.45 ? 1 : 2,
-        gap = leafCount === 1 ? 0.08 : 0.1,
-        leaf = Math.max(0.62, d.w / leafCount - gap),
-        group = d.kind === 'inner' ? room(d.building, d.storey) : culler.detail(d.building),
-        frameColor = d.kind === 'inner' ? 0xf4efe6 : 0xe9e2d5,
-        doorColor = d.color || (d.kind === 'inner' ? 0xc8b28e : b.accent);
-      const frame = (x, yy, z, w, hh, depth) => doorFrameB.add(place(x, yy, z, alongZ ? Math.PI / 2 : 0, w, hh, depth), frameColor, group);
-      // Jambs and head.
-      frame(d.x + (alongZ ? -d.face * 0.04 : -d.w / 2 - 0.05), y, d.z + (alongZ ? -d.w / 2 - 0.05 : -d.face * 0.04), 0.1, h, frameT);
-      frame(d.x + (alongZ ? -d.face * 0.04 : d.w / 2 + 0.05), y, d.z + (alongZ ? d.w / 2 + 0.05 : -d.face * 0.04), 0.1, h, frameT);
-      frame(d.x + (alongZ ? -d.face * 0.04 : 0), y + h / 2 + 0.05, d.z + (alongZ ? 0 : -d.face * 0.04), d.w + 0.2, 0.1, frameT);
-      thresholdB.add(place(d.x, y - h / 2 + 0.02, d.z, alongZ ? Math.PI / 2 : 0, d.w + 0.08, 0.04, Math.max(0.1, t + 0.02)), doorColor, group);
-      for (let k = 0; k < leafCount; k++) {
-        const s = leafCount === 1 ? 1 : k === 0 ? -1 : 1,
-          off = leafCount === 1 ? 0 : s * (d.w / 2 - leaf / 2 - 0.05),
-          x = d.x + (alongZ ? -d.face * 0.27 : off),
-          z = d.z + (alongZ ? off : -d.face * 0.27),
-          rot = alongZ ? Math.PI / 2 - s * d.face * 0.24 : s * d.face * 0.24,
-          i = doorB.add(place(x, y, z, rot, leaf, h, t), doorColor, group);
-        if (d.panels?.[k] !== undefined) link(this.byPanel, d.panels[k], doorB, i);
-      }
-    }
+    // One door system, not a second set of decorative leaves lying over it.
+    this.doorViews = new DoorViews(this.root, map, culler);
+    this.liftViews = new LiftViews(this.root, map, culler);
+    this.interiorViews = new InteriorViews(this.root, map, culler);
+    this.escalatorViews = new EscalatorViews(this.root,map,culler);
+    for (const b of (map.renderBuildings || map.buildings)) if (b.landmark034) culler.markDamaged(b.id);
     // Furniture, street furniture and cars.
     const wood = detailMaterial('oak', 0xffffff, { box: true, roughness: 0.7, key: 'crate' });
-    for (const d of map.decor) {
+    for (const d of (map.renderDecor || map.decor)) {
       const at = place(d.x, d.y, d.z, d.rot, 1, 1, 1).clone(),
         indoor = d.building !== undefined,
         group = indoor ? room(d.building, d.storey) : culler.outdoor(d.x, d.z);
@@ -448,7 +436,7 @@ export class Scenery {
     for (const b of this.batches.values()) b.build(this.root, culler);
     // Roofs: one merged mesh per material for the whole map.
     this.roofs = new RoofField(map, this.root);
-    for (const b of map.buildings) this.uppers.set(b.id, { visible: true });
+    for (const b of (map.renderBuildings || map.buildings)) this.uppers.set(b.id, { visible: true });
   }
   // Takes over a batch built elsewhere (nature): it joins the visibility groups and is refilled with the rest.
   adopt(key, batch) {
@@ -652,6 +640,7 @@ export class Scenery {
       m.castShadow = m.receiveShadow = true;
       m.visible = !animate;
       m.userData.appear = animate ? 0.9 : 0;
+      m.userData.rubbleBuilding = b.id;
       this.root.add(m);
       this.rubble.push(m);
     }
@@ -663,6 +652,10 @@ export class Scenery {
     for (const b of this.batches.values()) b.refill(this.culler.visible, this.culler.version);
   }
   update(dt, fx) {
+    this.doorViews?.update(dt);
+    this.liftViews?.update(dt);
+    this.interiorViews?.update(dt);
+    this.escalatorViews?.update(dt);
     for (let i = this.falling.length - 1; i >= 0; i--) {
       const f = this.falling[i];
       f.t += dt;
@@ -694,8 +687,12 @@ export class Scenery {
   }
   dispose() {
     this.root.removeFromParent();
-    for (const b of this.batches.values()) b.mesh?.dispose();
-    for (const l of this.cellLayers.values()) l.mesh.dispose();
+    for (const [key, b] of this.batches) { b.mesh?.dispose(); if (b.owned) b.geometry.dispose(); if (key === 'bags') b.material.dispose(); }
+    for (const l of this.cellLayers.values()) { l.mesh.geometry.dispose(); l.mesh.dispose(); }
+    this.doorViews?.dispose();
+    this.liftViews?.dispose();
+    this.interiorViews?.dispose();
+    this.escalatorViews?.dispose();
     this.roofs.dispose();
     for (const f of this.falling) f.group.traverse((o) => o.isMesh && o.geometry.dispose());
     for (const r of this.rubble) r.geometry.dispose();

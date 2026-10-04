@@ -1,3 +1,4 @@
+import { bossShouldThink } from './bot-budget.js';
 // Bosses and their relics. Four bosses guard lairs in the desert, the lake, the grove and the quarry (see world.js
 // LAIRS and PARK_LAIRS); each drops a relic with special abilities when defeated. It goes into the inventory (0.27:
 // it has its own slot, shown with the weapons) and drops when its owner falls. VIS, NOEMA, ENTROPIA and GELU and
@@ -136,7 +137,7 @@ export class BossSystem {
             }
           : { x: 20, z: 20 };
       return {
-        id: 'boss:' + l.boss,
+        id: 'boss:' + l.boss + (l.tile ? ':q' + l.tile : ''),
         kind: l.boss,
         name: info.name + ' · ' + info.title,
         home: { x: l.x, z: l.z },
@@ -314,6 +315,7 @@ export class BossSystem {
     return groundHeight(b.x, b.z, this.a.map) + (BOSSES[b.kind].float || 0);
   }
   stepBoss(b, dt) {
+    if (!bossShouldThink(this.a, b)) return;
     const a = this.a,
       info = BOSSES[b.kind];
     b.animTime += dt;

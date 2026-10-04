@@ -246,6 +246,16 @@ export function model(name) {
 }
 // Mesh parts of a loaded model with their transforms relative to the model root (for instancing).
 const partsCache = new Map();
+// Register an already parsed GLTF (also used by build-time geometry validation).
+// Browser callers still load the original textured GLB via loadAssets().
+export function registerModelAsset(name, asset) {
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_-]+$/.test(name) || !asset?.scene?.isObject3D)
+    throw new TypeError('Invalid parsed model asset: ' + String(name));
+  models.set(name, asset);
+  partsCache.delete(name);
+  return asset;
+}
+
 export function modelParts(name) {
   if (partsCache.has(name)) return partsCache.get(name);
   const asset = models.get(name);

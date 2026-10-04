@@ -1,3 +1,10 @@
+import { BotDecisionBudget } from './bot-budget.js';
+import { EscalatorSystem } from './escalator-system.js';
+import { LiftSystem } from './lift-system.js';
+import { sweepVehicleContacts } from './vehicle-contact.js';
+import { ColliderBudget } from './collider-budget.js';
+import { VehicleSystem } from './vehicle-system.js';
+import { initDoors, navigationMap, useDoor, stepDoors, doorSnapshot, damageDoor, destroyDoor, applyBlastHits } from './door-system.js';
 import { groundHeight, terrainMesh, terrainRay } from './terrain.js';
 import { castMap } from './raycast.js';
 import { direction, rayBox, EYE_HEIGHT } from './combat.js';
@@ -69,7 +76,7 @@ export class Arena {
     this.random = random;
     this.map = createWorld(seed, size);
     this.size = this.map.size;
-    this.nav = new Navigation(this.map);
+    this.nav = new Navigation(navigationMap(this.map));
     // `debug` is the solo sandbox: no storm, no timer, every item on tap. The server never creates it (server.mjs
     // builds arenas only from its own MODES table) and it turns rewards off, like any cheat.
     // `tutorial` (0.27) is the solo walk-through: no storm, no timer, no rewards, target dummies (tutorial.js).
@@ -80,14 +87,14 @@ export class Arena {
     // Contenders: Mini Royale 10, the big city royale 24 (10 humans at most, the rest bots), duels 2.
     this.maxPlayers = this.mode === 'duel' ? 2 : this.mode === 'royale' ? (this.size === 'city' ? 24 : 10) : 64;
     // The safe zone starts around the whole map and closes over 220 s (district) or 400 s (city).
-    this.zoneStart = Math.round(140 * (this.map.limit.x / 104));
-    this.royaleTime = this.size === 'city' ? 480 : 240;
+    this.zoneStart = Math.round(Math.hypot(this.map.limit.x, this.map.limit.z) + 12);
+    this.royaleTime = this.map.tiled ? 720 : this.size === 'city' ? 480 : 240;
     this.allowCheats = allowCheats;
     this.cheated = this.mode === 'debug';
     this.zone = { x: 0, z: 0, radius: this.zoneStart };
     // A duel on the big city (0.28) is fought in a fixed ring round the city centre: step out and it hurts, and
     // both players spawn inside it within sight range of each other.
-    if (this.mode === 'duel' && this.size === 'city') this.zone = { x: 0, z: 0, radius: 150, fixed: true };
+    if (this.mode === 'duel' && this.size === 'city') this.zone = { x: this.map.tiles?.[0]?.x || 0, z: this.map.tiles?.[0]?.z || 0, radius: 150, fixed: true };
     this.players = [];
     this.botCount = 0;
     this.bodies = new Map();
@@ -113,16 +120,17 @@ export class Arena {
     this.world = new RAPIER.World({ x: 0, y: 0, z: 0 });
     this.world.timestep = 1 / 60;
     this.colliders = new Map();
+    this.colliderBudget = new ColliderBudget(this, RAPIER, terrainMesh);
     for (const b of this.map.obstacles) this.addCollider(b);
     indexPanels(this.map);
     this.destruction = { panels: [], decor: [], buildings: [], wrecks: [], cells: {}, storeys: {}, props: [], roofs: [] };
     this.destroyedPanels = new Set(); // panels that no longer carry load (broken away or cut through)
     this.navDirty = false;
-    const { x, z } = this.map.limit,
-      ground = terrainMesh(this.map);
-    this.world.createCollider(
-      RAPIER.ColliderDesc.trimesh(ground.vertices, ground.indices, RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES),
-    );
+    const { x, z } = this.map.limit;
+    if (!this.map.tiled) {
+      const ground = terrainMesh(this.map);
+      this.world.createCollider(RAPIER.ColliderDesc.trimesh(ground.vertices, ground.indices, RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES));
+    }
     for (const b of [
       { x: -x - 1, z: 0, w: 2, d: z * 2 + 4 },
       { x: x + 1, z: 0, w: 2, d: z * 2 + 4 },
@@ -135,6 +143,10 @@ export class Arena {
     this.controller.enableSnapToGround(0.12);
     // Climb stair blocks (and kerbs) without jumping.
     this.controller.enableAutostep(0.42, 0.2, false);
+    initDoors(this);
+    this.lifts = new LiftSystem(this);
+    this.escalators = new EscalatorSystem(this);
+    this.vehicles = new VehicleSystem(this);
     this.bosses = new BossSystem(this);
     // Battle bus (royale): everyone starts aboard, flying across the map, and jumps out when they like.
     this.bus = null;
@@ -167,10 +179,26 @@ export class Arena {
     this.world.step();
   }
   addCollider(o) {
+    if (this.colliderBudget?.defer(o)) return;
     this.physicsDirty = true;
     // Small furniture only stops bullets; pre-cut slabs (stairwells) collide cell by cell.
     // Window glass stops people (not bullets' sight lines) until it shatters.
     if (o.nocollide && o.part !== 'glass') return this.colliders.set(o, null);
+    if (o.roofShape) {
+      const colliders = o.roofShape.map(shape => {
+        const desc = RAPIER.ColliderDesc.convexHull(new Float32Array(shape.vertices));
+        if (!desc) throw Error('Invalid convex roof geometry for building ' + o.building);
+        return this.world.createCollider(desc);
+      });
+      return this.colliders.set(o, colliders);
+    }
+    if (o.doorLeaf) {
+      const p = o.doorLeaf;
+      const desc = RAPIER.ColliderDesc.cuboid(p.w / 2, p.h / 2, p.t / 2)
+        .setTranslation(p.x, p.y, p.z)
+        .setRotation({ x: 0, y: Math.sin(p.yaw / 2), z: 0, w: Math.cos(p.yaw / 2) });
+      return this.colliders.set(o, this.world.createCollider(desc));
+    }
     if (o.cells) return this.colliders.set(o, this.cellColliders(o));
     // A wall with a window: four boxes around the opening, so you can climb through once the glass is gone.
     if (o.hole) {
@@ -201,7 +229,14 @@ export class Arena {
     if (o.rot) desc.setRotation({ x: 0, y: Math.sin(o.rot / 2), z: 0, w: Math.cos(o.rot / 2) });
     this.colliders.set(o, this.world.createCollider(desc));
   }
+  noteSupportChange036(o) {
+    this._supportRevision036 = (this._supportRevision036 || 0) + 1;
+    const changes = (this._supportChanges036 ??= []);
+    if (changes.length < 32) changes.push({ x:o.x, z:o.z, w:o.w, d:o.d });
+    else this._supportAll036 = true;
+  }
   removeObs(o) {
+    if (o.vehicleId === undefined && o.doorId === undefined && o.liftId === undefined) this.noteSupportChange036(o);
     this.physicsDirty = true;
     const c = this.colliders.get(o);
     for (const x of Array.isArray(c) ? c : c ? [c] : []) this.world.removeCollider(x, false);
@@ -216,6 +251,9 @@ export class Arena {
   }
   // ---- Destruction -------------------------------------------------------------------------------
   damageObstacle(o, amount, attacker) {
+    if (o.liftId !== undefined) return this.lifts.damage(o.liftId,amount);
+    if (o.vehicleId !== undefined) return this.vehicles.damage(o.vehicleId, amount, attacker);
+    if (o.doorId !== undefined) return damageDoor(this, o.doorId, amount, attacker);
     if (o.hp === undefined || o.hp <= 0 || !(amount > 0)) return;
     o.hp -= amount;
     if (o.hp <= 0) this.breakObstacle(o, attacker);
@@ -224,6 +262,7 @@ export class Arena {
   hitCells(o, hits, attacker) {
     if (!this.colliders.has(o) || o.panel === undefined || !hits.length) return 0;
     const removed = damageCells(o, hits);
+    if (removed.length && isSlab(o)) this.noteSupportChange036(o);
     if (!removed.length) return 0;
     if (cellsBroken(o)) {
       this.breakObstacle(o, attacker);
@@ -238,6 +277,7 @@ export class Arena {
     return removed.length;
   }
   cellColliders(o) {
+    if (this.colliderBudget?.defer(o)) return [];
     this.physicsDirty = true;
     return cellRects(o).map((r) =>
       this.world.createCollider(RAPIER.ColliderDesc.cuboid(r.w / 2, r.h / 2, r.d / 2).setTranslation(r.x, r.y, r.z)),
@@ -269,6 +309,7 @@ export class Arena {
     if (b.collapsed || (b.fallenFrom ?? Infinity) <= storey) return;
     b.fallenFrom = storey;
     this.destruction.storeys[b.id] = storey;
+    for (const d of this.map.doors) if (d.building === b.id && (d.storey || 0) >= storey) destroyDoor(this, d, attacker);
     const parts = storeyParts(this.map, b, storey);
     for (const o of parts) {
       if (o.panel !== undefined) delete this.destruction.cells[o.panel];
@@ -294,6 +335,9 @@ export class Arena {
     this.hitCells(o, hits, attacker);
   }
   breakObstacle(o, attacker) {
+    if (o.liftId !== undefined) return this.lifts.damage(o.liftId,1e6);
+    if (o.vehicleId !== undefined) return this.vehicles.damage(o.vehicleId, 1e6, attacker);
+    if (o.doorId !== undefined) return destroyDoor(this, this.map.doors[o.doorId], attacker);
     if (!this.colliders.has(o)) return;
     const info = { type: 'break', kind: o.part, x: o.x, y: o.y, z: o.z, w: o.w, h: o.h, d: o.d, color: o.color };
     if (o.part === 'car') {
@@ -335,7 +379,7 @@ export class Arena {
       this.unsupported(o, attacker);
       // The roof goes with the top floor slab.
       const b = this.map.buildings[o.building];
-      if (isSlab(o) && b && (o.storey ?? 0) === (b.storeys || 0)) {
+      if (isSlab(o) && b && !b.landmark034 && (o.storey ?? 0) === (b.storeys || 0)) {
         const roof = this.map.obstacles.find((q) => q.building === b.id && q.part === 'upper');
         if (roof) this.breakObstacle(roof, attacker);
         else if (!this.destruction.roofs.includes(b.id)) {
@@ -359,6 +403,7 @@ export class Arena {
     if (b.collapsed) return;
     b.collapsed = true;
     this.destruction.buildings.push(b.id);
+    for (const d of this.map.doors) if (d.building === b.id) destroyDoor(this, d, attacker);
     for (const o of this.map.obstacles) if (o.building === b.id && o.panel !== undefined) delete this.destruction.cells[o.panel];
     for (const o of collapseParts(this.map, b)) this.removeObs(o);
     for (const r of rubbleFor(b, this.map.chests)) this.addObs(r);
@@ -515,6 +560,7 @@ export class Arena {
     if (!aboard && b.t >= b.duration) b.active = false;
   }
   removePlayer(id) {
+    this.vehicles?.detach(id);
     const b = this.bodies.get(id);
     if (b) this.world.removeRigidBody(b.body);
     this.bodies.delete(id);
@@ -523,6 +569,7 @@ export class Arena {
     this.players = this.players.filter((p) => p.id !== id);
   }
   spawn(p) {
+    if (p.vehicle) this.vehicles?.exit(p, { force: true, quiet: true });
     let best = this.map.spawns[0],
       distance = -Infinity;
     const start = Math.floor(this.random() * this.map.spawns.length),
@@ -606,6 +653,13 @@ export class Arena {
     const held = p.inputAge === 0 ? p.input : {},
       once = (k) => i[k] === true || held[k] === true;
     p.input = {
+      turretAngle: clamp(Number.isFinite(i.turretAngle) ? i.turretAngle : i.angle, -Math.PI * 2, Math.PI * 2),
+      turretPitch: clamp(Number.isFinite(i.turretPitch) ? i.turretPitch : i.pitch, -1.35, 1.35),
+      drive: clamp(i.drive, -1, 1),
+      steer: clamp(i.steer, -1, 1),
+      vehicleAlt: i.vehicleAlt === true,
+      vehicleRocket: i.vehicleRocket === true,
+      vehicleBrake: i.vehicleBrake === true,
       x: clamp(i.x, -1, 1),
       z: clamp(i.z, -1, 1),
       angle: clamp(i.angle, -Math.PI * 2, Math.PI * 2),
@@ -616,6 +670,7 @@ export class Arena {
       ascend: clamp(i.ascend, -1, 1),
       sprint: i.sprint === true,
       slot: Number.isFinite(i.slot) ? Math.round(clamp(i.slot, 0, 4)) : undefined,
+      liftFloor: Number.isInteger(i.liftFloor) && i.liftFloor >= 0 && i.liftFloor < 32 ? i.liftFloor : held.liftFloor,
       interact: once('interact'),
       heal: once('heal'),
       ability1: i.ability1 === true,
@@ -633,6 +688,24 @@ export class Arena {
     p.inputAge = 0;
   }
   // Debug sandbox only (solo; the server never runs this mode): hand the player any weapon, gear or supply.
+  debugTravel(id, name) {
+    if (this.mode !== 'debug' || !this.allowCheats) return false;
+    const p = this.players.find(p => p.id === id && !p.bot);
+    const e = this.map.expansion;
+    const sites = this.map.expansions || (e ? [e] : []);
+    const landmark = this.map.landmarks?.find(l => l.id === name || l.kind === name);
+    const target = landmark || sites.flatMap(s => [s.base, ...s.villas]).find(s => s.id === name);
+    if (!p || !target) return false;
+    if (p.vehicle) this.vehicles.exit(p, { force: true, quiet: true });
+    const x = landmark ? this.map.buildings[landmark.building].x + this.map.buildings[landmark.building].entry034[0] : name.endsWith('fort') ? target.x - 10 : target.x + 20;
+    const z = landmark ? this.map.buildings[landmark.building].z + this.map.buildings[landmark.building].entry034[1] + 1.4 : name.endsWith('fort') ? target.z + 60 : target.z + 29;
+    Object.assign(p, { x, z, y: groundHeight(x, z, this.map)+0.1, vy: 0, grounded: true, dropping: false, gliding: false, hp: 100 });
+    const body = this.bodies.get(p.id);
+    body.collider.setEnabled(true);
+    body.body.setTranslation({ x:p.x, y:p.y+0.84, z:p.z }, false);
+    body.body.setNextKinematicTranslation({ x:p.x, y:p.y+0.84, z:p.z });
+    this.physicsDirty = true;return true;
+  }
   debugGive(id, what = {}) {
     const p = this.players.find((q) => q.id === id);
     if (this.mode !== 'debug' || !p || p.bot) return false;
@@ -1097,6 +1170,8 @@ export class Arena {
   }
   step(dt = 1 / 60) {
     this.tick++;
+    this.botBudget037 ??= new BotDecisionBudget();
+    this.botBudget037.update(this, dt);
     if (this.winner !== null) {
       if (!this.respawns) return;
       this.intermission -= dt;
@@ -1106,6 +1181,7 @@ export class Arena {
         this.round++;
         this.chests = this.map.chests.map((c) => ({ ...c, loot: { ...c.loot } }));
         this.projectiles = [];
+        this.vehicles.rounds.length = 0;
         this.charges = [];
         this.smokes = [];
         for (const d of [...this.deployables]) this.undeploy(d);
@@ -1121,6 +1197,14 @@ export class Arena {
     if (this.mode === 'royale')
       this.zone.radius =
         this.zoneStart * Math.max(0, 1 - Math.max(0, this.royaleTime - this.time - (this.zoneDelay || 20)) / (this.royaleTime - (this.zoneDelay || 20)));
+    this.colliderBudget?.update(dt);
+    if (this.map.tiled && this.physicsDirty) { this.physicsDirty = false; this.world.step(); }
+    this.lifts.step(dt);
+    this.escalators.step(dt);
+    stepDoors(this, dt);
+    this.vehicles.step(dt);
+    // Refresh moved doors and vehicles together before pedestrian collision queries.
+    if (this.physicsDirty) { this.physicsDirty = false; this.world.step(); }
     this.stepBus(dt);
     for (const p of this.players) {
       p.inputAge += dt;
@@ -1144,9 +1228,7 @@ export class Arena {
       p.shield = Math.max(0, p.shield - dt);
       p.cooldown = Math.max(0, p.cooldown - dt);
       let i = p.bot
-        ? this.botEvery > 1 && p.botInput && (this.tick + p.brain.slot) % this.botEvery
-          ? p.botInput
-          : (p.botInput = this.botInput(p, dt * this.botEvery))
+        ? (p.botInput = this.botBudget037.input(this, p, dt))
         : p.inputAge > 0.3
           ? {
               ...p.input,
@@ -1163,7 +1245,7 @@ export class Arena {
           : p.input;
       if (p.frozen > 0) i = { ...i, x: 0, z: 0, fire: false, jump: false, ascend: 0, sprint: false };
       for (let k = 0; k < 2; k++) {
-        const pressed = !!i['ability' + (k + 1)];
+        const pressed = !p.vehicle && !!i['ability' + (k + 1)];
         if (pressed && !p.abilityHeld[k]) this.bosses.use(p, k);
         p.abilityHeld[k] = pressed;
       }
@@ -1181,8 +1263,14 @@ export class Arena {
       }
       p.angle = i.angle ?? p.angle;
       p.pitch = i.pitch ?? p.pitch;
-      if (i.interact && !p.interactHeld) this.openChest(p);
+      if (Number.isInteger(i.liftFloor) && i.liftFloor !== p.liftChoiceHeld) this.lifts.use(p,i.liftFloor);
+      p.liftChoiceHeld = i.liftFloor;
+      if (i.interact && !p.interactHeld) {
+        if (p.vehicle) this.vehicles.exit(p);
+        else if (!this.lifts.use(p) && !useDoor(this, p) && !this.vehicles.enter(p)) this.openChest(p);
+      }
       p.interactHeld = !!i.interact;
+      if (p.vehicle && this.vehicles.mount(p)) { this.stepBuffs(p, dt); p.stamina = Math.min(100, p.stamina + 18 * dt); p.dashCd = Math.max(0, (p.dashCd || 0) - dt); p.jumpHeld = !!i.jump; continue; }
       if (i.heal && !p.healHeld && p.medkits > 0 && p.hp < 100 && !p.healing) {
         p.healing = 1.8;
         p.reload = 0;
@@ -1311,21 +1399,23 @@ export class Arena {
         const k = Math.exp(-2.2 * dt);
         p.push = Math.hypot(push.x, push.z) * k < 0.2 ? null : { x: push.x * k, z: push.z * k };
       }
+      const conveyor034 = this.escalators.carry(p,i,dt);
+      if (conveyor034.id) p.vy = 0;
       this.controller.computeColliderMovement(
         body.collider,
-        { x: (x * speed + push.x) * dt, y: p.vy * dt, z: (z * speed + push.z) * dt },
+        { x: (x * speed + push.x) * dt + conveyor034.x, y: p.vy * dt + conveyor034.y, z: (z * speed + push.z) * dt + conveyor034.z },
         undefined,
         undefined,
         (c) => !c.parent(),
       );
-      const m = this.controller.computedMovement();
+      const m = sweepVehicleContacts(this.map, p, this.controller.computedMovement());
       p.x = clamp(p.x + m.x, -this.map.limit.x + 0.4, this.map.limit.x - 0.4);
       p.z = clamp(p.z + m.z, -this.map.limit.z + 0.4, this.map.limit.z - 0.4);
-      p.y = clamp(p.y + m.y, 0, p.dropping ? 60 : 32);
-      p.grounded = this.controller.computedGrounded();
+      p.y = clamp(p.y + m.y, -32, p.cheats.flight && !p.dropping ? 32 : 145);
+      p.grounded = this.controller.computedGrounded() || m.supported || (!!conveyor034.id && Math.abs(m.y-conveyor034.y)<.06);
       if (p.grounded || (p.vy > 0 && m.y < p.vy * dt - 0.001)) p.vy = 0;
       if (p.grounded) p.gliding = p.dropping = p.launched = false;
-      p.moving = Math.hypot(m.x, m.z) / dt;
+      p.moving = Math.hypot(m.x-conveyor034.x, m.z-conveyor034.z) / dt;
       body.body.setTranslation({ x: p.x, y: p.y + 0.84, z: p.z }, false);
       body.body.setNextKinematicTranslation({ x: p.x, y: p.y + 0.84, z: p.z });
       // C4: the detonator fires every charge this player has placed, whatever they are holding now (once per press).
@@ -1398,7 +1488,7 @@ export class Arena {
         }
     if (this.navDirty && this.tick % 20 === 0) {
       this.navDirty = false;
-      this.nav = new Navigation(this.map);
+      this.nav = new Navigation(navigationMap(this.map));
       for (const p of this.players) if (p.bot) p.brain.pathTimer = 0;
     }
     if (this.zone.fixed)
@@ -1733,6 +1823,7 @@ export class Arena {
     return true;
   }
   damage(attacker, victim, amount, byBoss = null) {
+    if (victim.vehicle && this.vehicles.damageMounted(victim, amount, attacker)) return;
     if (victim.hp <= 0 || victim.shield > 0 || victim.cheats.god || victim.inBus) return;
     // Helper bots score for the player who summoned them.
     if (attacker?.helperOf) attacker = this.players.find((p) => p.id === attacker.helperOf && p.team === attacker.team) || attacker;
@@ -1776,6 +1867,7 @@ export class Arena {
       this.events.push({ type: 'dmg', by: attacker.id, id: victim.id, n: Math.round(amount), armor: absorbed > 0, x: victim.x, y: victim.y + 2, z: victim.z });
     victim.healing = 0;
     if (victim.hp === 0) {
+      if (victim.vehicle) this.vehicles.detach(victim.id);
       victim.respawn = this.respawns ? 3 : 0;
       victim.deaths++;
       victim.moving = 0;
@@ -1840,7 +1932,7 @@ export class Arena {
       } else if (o.hp !== undefined) hits.push([o, damage * 1.6 * Math.pow(1 - d / radius, 0.7)]);
     });
     for (const o of walls) this.hitCells(o, sphereHits(o, x, y, z, carve, damage * 1.6), owner);
-    for (const [o, amount] of hits) this.damageObstacle(o, amount, owner);
+    applyBlastHits(this, hits, owner);
     // No hidden building hit points: a building only comes down when its walls really fail. Hits on the
     // roof and facades just throw chunks.
     for (const [b, { amount, o }] of shaken) {
@@ -2237,6 +2329,12 @@ export class Arena {
   snapshot() {
     return {
       cheated: this.cheated,
+      doors: doorSnapshot(this.map),
+      lifts: this.lifts.snapshot(),
+      escalators: this.escalators.snapshot(),
+      vehicles: this.vehicles.snapshot(),
+      vehicleShots: this.vehicles.shotSnapshot(),
+      ramCleared: [...this.vehicles.clearedRubble],
       destruction: {
         panels: [...this.destruction.panels],
         decor: [...this.destruction.decor],
@@ -2281,6 +2379,10 @@ export class Arena {
     return this.events.splice(0);
   }
   dispose() {
+    this.lifts?.dispose();
+    this.vehicles?.dispose();
+    this.colliderBudget?.dispose();
+    this.botBudget037?.dispose();
     this.world.free();
   }
 }

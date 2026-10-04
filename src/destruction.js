@@ -12,12 +12,14 @@ export function removeObstacle(map, o) {
   const i = map.obstacles.indexOf(o);
   if (i < 0) return false;
   map.obstacles.splice(i, 1);
+  map.obstacleVersion = (map.obstacleVersion || 0) + 1;
   map.obstacles.grid?.remove(o);
   map.obstacles.lowGrid?.remove(o);
   return true;
 }
 export function addObstacle(map, o) {
   map.obstacles.push(o);
+  map.obstacleVersion = (map.obstacleVersion || 0) + 1;
   map.obstacles.grid?.add(o);
   if (isLowSolid(o)) map.obstacles.lowGrid?.add(o);
 }

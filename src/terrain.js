@@ -1,3 +1,5 @@
+import { landscapeHeight } from './landscape.js';
+import { regionMesh, fastBiome } from './terrain-region.js';
 // One shared triangle grid drives rendering, Rapier collision and ray/loot heights.
 export const TERRAIN_STEP = 2;
 // Hills are bucketed on a 32 m grid once there are many of them (the big map has hundreds of dunes and mounds).
@@ -28,7 +30,7 @@ export function rawHeight(x, z, map) {
     const r2 = ((x - h.x) ** 2 + (z - h.z) ** 2) / (h.radius * h.radius);
     if (r2 < 1) y += h.height * (1 - r2) ** 2;
   }
-  return y;
+  return landscapeHeight(x,z,y,map);
 }
 export function groundHeight(x, z, map) {
   const step = TERRAIN_STEP,
@@ -42,30 +44,8 @@ export function groundHeight(x, z, map) {
     d = rawHeight(x0 + step, z0 + step, map);
   return fx + fz <= 1 ? a + (b - a) * fx + (c - a) * fz : d + (c - d) * (1 - fx) + (b - d) * (1 - fz);
 }
-export function terrainMesh(map) {
-  const nx = (map.limit.x * 2) / TERRAIN_STEP,
-    nz = (map.limit.z * 2) / TERRAIN_STEP,
-    vertices = new Float32Array((nx + 1) * (nz + 1) * 3),
-    indices = new Uint32Array(nx * nz * 6);
-  let n = 0,
-    k = 0;
-  for (let z = 0; z <= nz; z++)
-    for (let x = 0; x <= nx; x++) {
-      const xx = x * TERRAIN_STEP - map.limit.x,
-        zz = z * TERRAIN_STEP - map.limit.z;
-      vertices[n++] = xx;
-      vertices[n++] = rawHeight(xx, zz, map);
-      vertices[n++] = zz;
-    }
-  for (let z = 0; z < nz; z++)
-    for (let x = 0; x < nx; x++) {
-      const a = z * (nx + 1) + x,
-        b = a + 1,
-        c = a + nx + 1,
-        d = c + 1;
-      for (const v of [a, c, b, b, c, d]) indices[k++] = v;
-    }
-  return { vertices, indices };
+export function terrainMesh(map, bounds = null) {
+  return regionMesh(map, rawHeight, TERRAIN_STEP, bounds);
 }
 export function terrainNormal(x, z, map) {
   const dx = groundHeight(x - 0.15, z, map) - groundHeight(x + 0.15, z, map),
@@ -94,6 +74,7 @@ export function terrainRay(origin, dir, range, map) {
   return Infinity;
 }
 export function biomeAt(x, z, map) {
+  if (map.tiled) return fastBiome(x, z, map);
   const zone = map.parks?.find((p) => Math.abs(x - p.x) < p.w / 2 - 2 && Math.abs(z - p.z) < p.d / 2 - 2);
   return zone?.type || 'city';
 }
