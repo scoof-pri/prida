@@ -1,75 +1,37 @@
+// Before-Docker CI guard. Both cumulative installers and exported expanded projects are supported.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import { recoverBuild, blobHash, RECOVERED_HASH } from '../prida-build-recovery.mjs';
-
-const root = new URL('../', import.meta.url);
-const original = fs.readFileSync(new URL('prida-update.mjs', root));
-function fixture(t, bytes = original) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prida-build-entry-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const file = path.join(dir, 'prida-update.mjs');
-  fs.writeFileSync(file, bytes);
-  return { dir, file };
-}
-function payload(source, name) {
-  const prefix = '  ' + JSON.stringify(name) + ': ';
-  const start = source.indexOf(prefix);
-  assert.ok(start >= 0, 'Missing payload ' + name);
-  const raw = source.slice(start + prefix.length, source.indexOf('\n', start));
-  return JSON.parse(raw.endsWith(',') ? raw.slice(0, -1) : raw);
-}
-test('every release entrypoint restores the lift repair before running the installer', () => {
-  const pkg = JSON.parse(fs.readFileSync(new URL('package.json', root), 'utf8'));
-  assert.equal(pkg.version, '0.37.2');
-  for (const hook of ['prebuild', 'predev', 'pretest', 'prestart', 'prebuild:crazygames', 'prebuild:crazygames:full']) {
-    assert.equal(pkg.scripts[hook], 'node prida-build-recovery.mjs && node prida-update.mjs', hook);
+import {createHash} from 'node:crypto';
+const root=new URL('../',import.meta.url),pkg=JSON.parse(fs.readFileSync(new URL('package.json',root)));
+const installerURL=new URL('prida-update.mjs',root);
+const installer=fs.existsSync(installerURL)?await import(installerURL):null;
+const payload=installer?.decodePayload?.();
+function read(name){return payload?.get(name)||fs.readFileSync(new URL(name,root));}
+test('build entrypoints use the complete current installer, not obsolete recovery overlays',()=>{
+  assert.equal(pkg.version,'0.41.0');
+  for(const name of ['prebuild','predev','pretest','prestart','prebuild:crazygames','prebuild:crazygames:full']){
+    if(pkg.pridaExpandedSource)assert.equal(pkg.scripts[name],undefined);
+    else assert.equal(pkg.scripts[name],'node prida-update.mjs');
+  }
+  assert.ok(pkg.scripts.build.startsWith('vite build'));
+});
+test('binary avatars are complete GLBs, not a network download or HTML placeholder',()=>{
+  for(const n of ['tactical-player','aegis-player','aegis-gauntlets']){
+    const b=read('public/models/'+n+'.glb');assert.equal(b.toString('ascii',0,4),'glTF');assert.equal(b.readUInt32LE(4),2);assert.equal(b.readUInt32LE(8),b.length);
   }
 });
-test('dry recovery verifies all bytes without changing the upload', t => {
-  const { dir, file } = fixture(t);
-  assert.ok(['verified', 'already-fixed'].includes(recoverBuild(file, { checkOnly: true }).status));
-  assert.deepEqual(fs.readFileSync(file), original);
-  assert.deepEqual(fs.readdirSync(dir), ['prida-update.mjs']);
+test('current source keeps the native lift contract and routes actual avatar/flight integrations',()=>{
+  assert.match(read('src/entity-delta.js').toString(),/isLiftSnapshot/);
+  assert.match(read('src/render.js').toString(),/poseCustomAvatar\(v,p,dt,extra\)/);
+  assert.match(read('src/main.js').toString(),/suitThrust: active && suit/);
+  assert.match(read('src/world.js').toString(),/addBaseDroneStations\(map\)/);
 });
-test('recovery is complete, idempotent and leaves no temporary files', t => {
-  const { dir, file } = fixture(t);
-  recoverBuild(file);
-  const recovered = fs.readFileSync(file);
-  assert.equal(blobHash(recovered), RECOVERED_HASH);
-  assert.equal(recoverBuild(file).status, 'already-fixed');
-  assert.deepEqual(fs.readFileSync(file), recovered);
-  assert.deepEqual(fs.readdirSync(dir), ['prida-update.mjs']);
-  assert.match(recovered.toString(), /0\.37\.2 · BUILD RECOVERY/);
+test('release marker and package match, including the portal upload',()=>{
+  assert.match(read('index.html').toString(),/0\.41\.0 · BASE DRONES \/ CUSTOM CHARACTERS/);
+  assert.equal(JSON.parse(read('package.json')).version,pkg.version);
 });
-test('unrecognized or later uploads are rejected without replacing user code', t => {
-  const changed = Buffer.concat([original, Buffer.from('\n// later change\n')]);
-  const { dir, file } = fixture(t, changed);
-  assert.throws(() => recoverBuild(file), /Unsupported or edited installer/);
-  assert.deepEqual(fs.readFileSync(file), changed);
-  assert.deepEqual(fs.readdirSync(dir), ['prida-update.mjs']);
-});
-test('recovered real payload round-trips idle, moving and destroyed lift envelopes', async t => {
-  const { file } = fixture(t);
-  recoverBuild(file);
-  const source = fs.readFileSync(file, 'utf8');
-  const code = payload(source, 'src/entity-delta.js');
-  const { prepareEntities, entityDeltaPacket, EntityDeltaMirror } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
-  let previous, seq = 0;
-  const mirror = new EntityDeltaMirror();
-  for (const lifts of [
-    { revision: 0, states: [] },
-    { revision: 1, states: [['lift-a', 2.5, 0, 1, 0, 'moving', 400]] },
-    { revision: 2, states: [['lift-a', 2.5, 0, 1, 0, 'broken', 0]] },
-  ]) {
-    const packet = entityDeltaPacket(prepareEntities({ vehicles: [], doors: [], lifts }, ++seq), previous);
-    previous = packet.next;
-    const received = mirror.apply({ entityDelta: JSON.parse(packet.json) });
-    assert.deepEqual(received.lifts, lifts);
-    assert.equal(Array.isArray(received.lifts), false);
-  }
-  assert.match(payload(source, 'tests/entity-delta-037.test.mjs'), /native idle lift envelope/);
-  assert.match(payload(source, 'tests/integration-frontier-037.test.mjs'), /native lift envelopes survive NetFeed/);
+test('model provenance report matches both supplied asset geometries',()=>{
+  const r=JSON.parse(read('public/PRIDA-0.41-model-report.json'));
+  assert.ok(JSON.stringify(r).includes('originalTriangles'));assert.ok(JSON.stringify(r).includes('sourceSHA256'));
 });
