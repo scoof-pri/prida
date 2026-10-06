@@ -1,3 +1,4 @@
+import { detailedRoof } from './roof-details.js';
 // Procedural roofs in the world's PBR style: pitched tile roofs on houses (gable or hipped, with chimneys),
 // flat roofs with parapets and rooftop plant on shops and offices, corrugated sheds and sawtooth roofs on industry,
 // and brick smokestacks on the big works. Deterministic per building, so every client builds the same roofs.
@@ -229,7 +230,7 @@ function flat(m, b, plan, deck = roofTop(b)) {
     key = facadeKey(b),
     w = b.w,
     d = b.d;
-  if (deck - b.roofBase > 0.05) m.box(key, b.x, b.roofBase - 0.02, b.z, w, deck - b.roofBase + 0.02, d, wall, { top: 'gravel', topColor: gravel });
+  if (deck - b.roofBase > 0.05) m.box(key, b.x, b.roofBase + 0.006, b.z, w, deck - b.roofBase - 0.006, d, wall, { top: 'gravel', topColor: gravel });
   else m.quad('gravel', V(b.x - w / 2, deck + 0.01, b.z + d / 2), V(b.x + w / 2, deck + 0.01, b.z + d / 2), V(b.x + w / 2, deck + 0.01, b.z - d / 2), V(b.x - w / 2, deck + 0.01, b.z - d / 2), gravel);
   // Parapet: four walls along the edge (outer faces flush with the facade) and a coping on top.
   const ph = PARAPET.h - 0.08,
@@ -241,8 +242,8 @@ function flat(m, b, plan, deck = roofTop(b)) {
   const cy = deck + ph;
   m.box('concrete', b.x, cy, b.z + d / 2 - t / 2, w + 0.12, 0.08, t + 0.12, trim);
   m.box('concrete', b.x, cy, b.z - d / 2 + t / 2, w + 0.12, 0.08, t + 0.12, trim);
-  m.box('concrete', b.x + w / 2 - t / 2, cy, b.z, t + 0.12, 0.08, d - 2 * t, trim);
-  m.box('concrete', b.x - w / 2 + t / 2, cy, b.z, t + 0.12, 0.08, d - 2 * t, trim);
+  m.box('concrete', b.x + w / 2 - t / 2, cy, b.z, t + 0.12, 0.08, d - 2 * t - 0.12, trim);
+  m.box('concrete', b.x - w / 2 + t / 2, cy, b.z, t + 0.12, 0.08, d - 2 * t - 0.12, trim);
   // Rooftop plant (world.js roofPlan: the same spots carry collision boxes).
   const metal = surfaceTint('steel', 0xc9ccce),
     dark = grey(0.03);
@@ -251,7 +252,7 @@ function flat(m, b, plan, deck = roofTop(b)) {
     if (it.kind === 'housing') {
       // Stair and lift housing on taller buildings.
       m.box(key, x, deck, z, 2.8, 2.9, 3.2, wall, { top: 'concrete', topColor: trim });
-      m.box('metal', x, deck, z + 1.61, 1.0, 2.1, 0.04, surfaceTint('steel', 0x59636b));
+      m.box('metal', x, deck, z + 1.635, 1.0, 2.1, 0.04, surfaceTint('steel', 0x59636b));
     } else if (it.kind === 'ac') {
       // Air-conditioning unit: a metal cabinet with a dark fan on top.
       const rot = it.rot;
@@ -367,8 +368,7 @@ function smokestack(m, b) {
 export function buildRoof(m, b) {
   const plan = roofPlan(b),
     style = plan.style;
-  if (style === 'gable' || style === 'hip') pitched(m, b, plan, style === 'hip');
-  else if (style === 'shed' || style === 'saw') industrial(m, b, style === 'saw');
+  if (style !== 'flat') detailedRoof(m, b, plan, facadeOf(b));
   else flat(m, b, plan);
   smokestack(m, b);
 }
@@ -397,7 +397,8 @@ export class RoofField {
   constructor(map, parent) {
     // One set of meshes per 128 m region: regions out of view are frustum-culled.
     const regions = new Map();
-    for (const b of map.buildings) {
+    for (const b of (map.renderBuildings || map.buildings)) {
+      if (b.landmark034) continue;
       const key = Math.floor(b.x / 128) + ':' + Math.floor(b.z / 128);
       if (!regions.has(key)) regions.set(key, new Mesher());
       const m = regions.get(key);

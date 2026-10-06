@@ -14,13 +14,7 @@
     "build:hf": "node scripts/make-hf-space.mjs",
     "build:crazygames": "node scripts/package-crazygames.mjs",
     "build:crazygames:full": "node scripts/package-crazygames.mjs --full",
-    "export:full": "node scripts/package-full.mjs",
-    "prebuild": "node prida-update.mjs",
-    "predev": "node prida-update.mjs",
-    "pretest": "node prida-update.mjs",
-    "prestart": "node prida-update.mjs",
-    "prebuild:crazygames": "node prida-update.mjs",
-    "prebuild:crazygames:full": "node prida-update.mjs"
+    "export:full": "node scripts/package-full.mjs"
   },
   "keywords": [],
   "author": "",
@@ -36,5 +30,6 @@
     "@gltf-transform/core": "^4.4.0",
     "@gltf-transform/extensions": "^4.4.0",
     "@gltf-transform/functions": "^4.4.0"
-  }
+  },
+  "pridaExpandedSource": true
 }

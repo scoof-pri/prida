@@ -1,3 +1,4 @@
+import { CUSTOM_CHARACTER_FILES, prepareCustomAvatar, instantiateCustomAvatar } from './custom-characters.js';
 import * as T from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { WEAPONS, GEAR } from './catalog.js';
@@ -6,7 +7,7 @@ import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { gunMaterial } from './materials.js';
 // Players and bots (0.27.1, back from 0.21): Quaternius' Toon Shooter soldiers with their own clips and the guns
 // that ship in their right hands. (0.22–0.27 used combat operators, soldier.js; see PRIDA-BASELINE §7.13.)
-export const CHARACTER_FILES = ['soldier', 'hazmat', 'scout'];
+export const CHARACTER_FILES = [...CUSTOM_CHARACTER_FILES];
 const models = new Map(),
   textures = new Map();
 // CC0 Poly Haven PBR sets (see ASSET-CREDITS.md): colour map, OpenGL normal map (_n) and AO/roughness/metal map
@@ -200,11 +201,12 @@ export async function loadAssets(progress = () => {}) {
             o.castShadow = true;
             o.receiveShadow = true;
             for (const m of [o.material].flat()) {
-              m.roughness = 0.85;
+              if (!CUSTOM_CHARACTER_FILES.includes(name)) m.roughness = 0.85;
               m.side = open.has(m) || name === 'glider' ? T.DoubleSide : T.FrontSide;
             }
           }
         });
+        if(name==='tactical-player'||name==='aegis-player') prepareCustomAvatar(gltf,name==='tactical-player'?'soldier':'suit');
         models.set(name, gltf);
         progress(++done, total);
       }
@@ -222,12 +224,10 @@ export async function loadAssets(progress = () => {}) {
     });
 }
 // A soldier (0 soldier, 1 hazmat, 2 scout) with its own skeleton, and its animation mixer and clips.
-export function character(index = 0) {
-  const a = models.get(CHARACTER_FILES[((index % 3) + 3) % 3]),
-    root = cloneSkeleton(a.scene),
-    mixer = new T.AnimationMixer(root);
-  root.scale.setScalar(0.88);
-  return { model: root, mixer, clips: a.animations };
+export function character(index = 0, suit = false) {
+  const kind=suit?'suit':'soldier', asset=models.get(suit?'aegis-player':'tactical-player');
+  if(!asset)throw new Error('Custom player asset was not loaded: '+kind);
+  return instantiateCustomAvatar(asset,kind);
 }
 // Weapon nodes that ship attached to the soldiers' right hands. Everything else is mounted there at runtime.
 export const ALL_CHARACTER_GUNS = ['AK', 'GrenadeLauncher', 'Knife_1', 'Knife_2', 'Pistol', 'Revolver', 'Revolver_Small', 'RocketLauncher', 'ShortCannon', 'Shotgun', 'Shovel', 'SMG', 'Sniper', 'Sniper_2'];
@@ -246,6 +246,16 @@ export function model(name) {
 }
 // Mesh parts of a loaded model with their transforms relative to the model root (for instancing).
 const partsCache = new Map();
+// Register an already parsed GLTF (also used by build-time geometry validation).
+// Browser callers still load the original textured GLB via loadAssets().
+export function registerModelAsset(name, asset) {
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_-]+$/.test(name) || !asset?.scene?.isObject3D)
+    throw new TypeError('Invalid parsed model asset: ' + String(name));
+  models.set(name, asset);
+  partsCache.delete(name);
+  return asset;
+}
+
 export function modelParts(name) {
   if (partsCache.has(name)) return partsCache.get(name);
   const asset = models.get(name);
@@ -297,6 +307,7 @@ export function gun(index = 0) {
   return root;
 }
 export function gearModel(id) {
+
   const g = GEAR.find((g) => g.id === id);
   return g ? model(g.model) : null;
 }

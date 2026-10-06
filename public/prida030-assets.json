@@ -1,0 +1,35 @@
+{
+  "version": "0.30",
+  "license": "CC0-1.0",
+  "provider": "3DAssets.dev",
+  "providerUsesAI": true,
+  "models": {
+    "tank": {
+      "status": "downloaded",
+      "source": "https://cdn.3dassets.dev/assets/23667/v1/model.glb",
+      "page": "https://3dassets.dev/packs/armoured-column-and-field-camp",
+      "bytes": 103556,
+      "sha256": "277c759681367f5a79c1231dcb7415c23699d0d947b9f852ef01e7335c75468d",
+      "animations": []
+    },
+    "plane": {
+      "status": "downloaded",
+      "source": "https://cdn.3dassets.dev/assets/32595/v1/model.glb",
+      "page": "https://3dassets.dev/assets/aircraft-fleet-and-airfield-radial-warbird-fighter-95c4cb8f",
+      "bytes": 978468,
+      "sha256": "482856aea40a151c654d8657fe988895c13304f230276945bf0d6f4922ae94d6",
+      "animations": [
+        "canopy-open",
+        "canopy-close",
+        "prop-spin",
+        "wheel-roll",
+        "aileron-roll",
+        "flap-tilt",
+        "elevator-tilt",
+        "rudder-steer",
+        "cowl-open",
+        "cowl-close"
+      ]
+    }
+  }
+}

@@ -46,7 +46,7 @@ const accounts = createAccounts({ store: storeFromEnv(process.env, path.dirname(
 // `duel-city` (0.28): a 1 v 1 inside a fixed ring in the middle of the big city. Duels simulate at 60 Hz and send
 // 30 states a second (two players cost next to nothing), so shots and movement feel right at up to 100 ms ping.
 const MODES = {
-  'royale-city': { mode: 'royale', size: 'city', humans: 10, label: 'Big City Royale', hz: 30, sendEvery: 4 },
+  'royale-city': { mode: 'royale', size: 'city', humans: 10, label: 'Big City Royale', hz: 30, sendEvery: 2 },
   royale: { mode: 'royale', size: 'district', humans: 10, label: 'Mini Royale', hz: 30, sendEvery: 3 },
   duel: { mode: 'duel', size: 'district', humans: 2, label: 'Duel · 1 v 1', hz: 60, sendEvery: 2 },
   'duel-city': { mode: 'duel', size: 'city', humans: 2, label: 'Duel · Big City', hz: 60, sendEvery: 2 },

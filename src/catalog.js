@@ -850,4 +850,5 @@ export const GEAR = [
     color: '#8d949c',
     iconRot: [0, 0.5, 0],
   },
+  { id:'aegis',name:'AEGIS SUIT',desc:'NOVA flight armour. Hold SPACE to fly; WASD moves, look up/down to climb/dive. SPACE+C descends. Release SPACE to fall. LMB pulse; hold RMB charged beam. Recharges on the ground.',model:'jetpack',icon:'aegis.svg',starter:false,color:'#66dded',fuel:100 },
 ];

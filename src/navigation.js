@@ -1,3 +1,4 @@
+import { sparsePath } from './sparse-navigation.js';
 // One-metre navigation grid. Doorways, walls and furnishings share the physics map.
 export class Navigation {
   constructor(map) {
@@ -37,6 +38,7 @@ export class Navigation {
   // A* over the grid with reused buffers and a node budget (the city map has ~250k cells). When the goal is out
   // of reach within the budget the path leads to the explored node closest to it.
   path(a, b, budget = 30000) {
+    if (this.map.tiled) return sparsePath(this, a, b, budget);
     const start = this.node(a),
       end = this.node(b);
     if (start < 0 || end < 0) return [];

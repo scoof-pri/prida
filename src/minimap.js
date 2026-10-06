@@ -1,3 +1,4 @@
+import { boundaryOf, rect } from './landmark-geometry.js';
 // Corner minimap: the map is drawn once to an offscreen canvas, then a rotating window around the player is
 // copied each frame (forward is always up). Overlays: safe zone, bus route, bosses, relics, portals, squad.
 import { BOSSES, RELICS } from './bosses.js';
@@ -23,6 +24,7 @@ export class Minimap {
   setMap(map) {
     if (this.map === map) return;
     this.map = map;
+    this.scale = map.tiled ? Math.min(1.6,2048/(Math.max(map.limit.x,map.limit.z)*2)) : 1.6;
     const L = map.limit,
       s = this.scale,
       c = document.createElement('canvas');
@@ -51,12 +53,18 @@ export class Minimap {
         g.fill();
       } else g.fillRect(X(w.x - w.w / 2), Z(w.z - w.d / 2), w.w * s, w.d * s);
     }
+    for (const f of map.terrainFeatures || []) {
+      if (f.kind === 'river') { g.strokeStyle='#4b93a4'; g.lineWidth=f.width*s; g.lineJoin='round'; g.lineCap='round'; g.beginPath(); f.points.forEach((p,i)=>i?g.lineTo(X(p.x),Z(p.z)):g.moveTo(X(p.x),Z(p.z))); g.stroke(); }
+      else { g.fillStyle=f.kind==='lake'?'#4b93a4':'#879180';g.beginPath();g.ellipse(X(f.x),Z(f.z),f.rx*s,f.rz*s,0,0,Math.PI*2);g.fill(); }
+    }
     for (const b of map.buildings) {
       g.fillStyle = b.category === 'industry' ? '#b19d80' : b.category === 'home' ? '#c3cfb3' : '#b9c6c4';
-      g.fillRect(X(b.x - b.w / 2), Z(b.z - b.d / 2), b.w * s, b.d * s);
+      if (b.footprints034) for (const a of b.footprints034[0]) g.fillRect(X(b.x+a[0]),Z(b.z+a[1]),(a[2]-a[0])*s,(a[3]-a[1])*s);
+      else g.fillRect(X(b.x - b.w / 2), Z(b.z - b.d / 2), b.w * s, b.d * s);
       g.strokeStyle = '#46524f';
       g.lineWidth = 1;
-      g.strokeRect(X(b.x - b.w / 2), Z(b.z - b.d / 2), b.w * s, b.d * s);
+      if (b.footprints034) { g.beginPath();for(const e of boundaryOf(b.footprints034[0].map(a=>rect(...a)))){g.moveTo(X(b.x+(e.axis==='x'?e.lo:e.at)),Z(b.z+(e.axis==='x'?e.at:e.lo)));g.lineTo(X(b.x+(e.axis==='x'?e.hi:e.at)),Z(b.z+(e.axis==='x'?e.at:e.hi)));}g.stroke(); }
+      else g.strokeRect(X(b.x - b.w / 2), Z(b.z - b.d / 2), b.w * s, b.d * s);
     }
     g.fillStyle = '#2f5a3a';
     for (const [x, z] of map.trees) {

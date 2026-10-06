@@ -1,3 +1,17 @@
+import { createPortalUI, mountPortalExportLinks } from './crazygames-ui.js';
+import { portal, portalMode, portalAdBusy, portalLoading } from './sdk.js';
+let portalUi035 = null;
+let portalSound035 = null;
+import { developerMode, mountDeveloperSettings } from './developer-mode.js';
+import { nearLift } from './lift-system.js';
+import { buildLiftPanel } from './lift-ui.js';
+let liftFloor033;
+import { sweepVehicleContacts } from './vehicle-contact.js';
+import { nearestVehicle } from './vehicle-system.js';
+import { loadVehicleModels } from './vehicle-models.js';
+import { vehicleTouch, updateVehicleHUD } from './vehicle-hud.js';
+import { engineSound, vehicleReport } from './vehicle-audio.js';
+import { nearestDoor } from './door-system.js';
 import { loadAssets, setTextureQuality, TEXTURE_SIZES } from './assets.js';
 import { lineClear } from './world.js';
 import { LookInput } from './look-input.js';
@@ -21,6 +35,9 @@ import { Tutorial } from './tutorial.js';
 import { hostGroup, joinGroup } from './p2p.js';
 import { BOSSES, RELICS, MOVE_LABELS } from './bosses.js';
 import { GRADE_FIELDS, GRADE_PRESETS, DEFAULT_GRADE, sanitizeGrade, startingGrade } from './grading.js';
+import { BUILD_KINDS, BUILD_MATERIALS } from './construction.js';
+import { DRONE_RULES } from './drone-system.js';
+import { SUIT_RULES } from './technology-system.js';
 // Map colours for parks and wild biomes (inventory map and minimap).
 const ZONE_COLORS = {
   quarry: '#b6a180',
@@ -76,6 +93,14 @@ const cheatSettings = { flight: false, infinite: false, god: false, bazooka: fal
 const BAZOOKA_CODE = '112358';
 let inventoryOpen = false,
   interact = false,
+  buildMode040 = false,
+  buildType040 = 0,
+  buildRotation040 = 0,
+  buildMaterial040 = 0,
+  droneToggle040 = false,
+  suitToggle040 = false,
+  techUse040 = false,
+  bomb040 = false,
   detonate = false,
   heal = false,
   emote = false,
@@ -204,6 +229,7 @@ function playInviteSound() {
   } catch {}
 }
 function unlockAudio() {
+  if (portalAdBusy()) return;
   if (!audio)
     try {
       audio = new (window.AudioContext || window.webkitAudioContext)();
@@ -213,7 +239,8 @@ function unlockAudio() {
 function clearInput() {
   flyUp = false;
   flyDown = false;
-  interact = false;
+  interact = false; liftFloor033 = undefined;
+  buildMode040 = false; droneToggle040 = suitToggle040 = techUse040 = bomb040 = false;
   detonate = false;
   heal = false;
   emote = false;
@@ -252,7 +279,7 @@ function toggleCameraView() {
 }
 // The debug sandbox runs only in a local match (never online, never on the server).
 function debugging() {
-  return mode === 'training' && sim?.mode === 'debug';
+  return developerMode() && mode === 'training' && sim?.mode === 'debug';
 }
 // Is the local player holding a remote charge (C4)?
 function holdingCharge() {
@@ -297,7 +324,7 @@ function guideCard(i) {
   return `<button class="kit-choice" data-kit="weapon" data-value="${i}" style="--rarity:${w.rarity !== undefined ? rarityColor(w.rarity) : 'transparent'}"><span class="kit-art"><img src="./icons/${w.model}.png" alt=""></span><b>${w.name}</b><small>${r}${w.ru} · ${statLine(w)}</small></button>`;
 }
 function gearCard(g) {
-  return `<button class="kit-choice" data-kit="gear" data-value="${g.id}"><span class="kit-art"><img src="./icons/${g.model}.png" alt=""></span><b>${g.name}</b><small>${g.desc}</small></button>`;
+  return `<button class="kit-choice" data-kit="gear" data-value="${g.id}"><span class="kit-art"><img src="./icons/${g.icon || g.model+'.png'}" alt=""></span><b>${g.name}</b><small>${g.desc}</small></button>`;
 }
 // The play tab shows a few highlights; any of them opens the full list.
 function renderLoadoutSummary() {
@@ -384,6 +411,7 @@ function begin(m) {
   captureMouse();
 }
 function train(kind = $('#gameMode').value) {
+  if (String(kind).includes('debug') && !developerMode()) { toast('Enable Developer Mode in Settings first.'); return; }
   disconnect();
   clearTimeout(connectionTimer);
   tutorial?.dispose();
@@ -396,8 +424,8 @@ function train(kind = $('#gameMode').value) {
     bots: city ? 23 : mode === 'royale' ? 9 : mode === 'debug' || mode === 'tutorial' ? 0 : 16,
     seed: mapSeed,
     mode,
-    size: city ? 'city' : 'district',
-    allowCheats: true,
+    size: city || mode === 'debug' ? 'city' : 'district',
+    allowCheats: developerMode(),
     bus: mode === 'royale',
   });
   const p = sim.addPlayer('you', 'YOU');
@@ -658,7 +686,8 @@ function connectGroup(create = false, queue = null) {
         lastSt = msg.state.st || 0;
         interp.push(msg.state);
         const mine = msg.state.players.find((p) => p.id === id);
-        if (mine && view?.map) predictor.server(mine, msg.self?.ack, view.map, predictCtx(mine));
+        if (mine?.vehicle) predictor.idle(mine);
+        else if (mine && view?.map) predictor.server(mine, msg.self?.ack, view.map, predictCtx(mine));
         state = msg.state;
         // The group only comes when it changes.
         if ('group' in msg) group = msg.group;
@@ -824,7 +853,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
-  if (!e.repeat && /^Digit[0-9]$/.test(e.code)) {
+  if (developerMode() && mode !== 'online' && !e.repeat && /^Digit[0-9]$/.test(e.code)) {
     cheatBuffer = (cheatBuffer + e.code.slice(-1)).slice(-6);
     if (cheatBuffer === '250886') {
       cheatUnlocked = true;
@@ -848,6 +877,7 @@ window.addEventListener('keydown', (e) => {
     }
     return;
   }
+  if (portalAdBusy()) { e.preventDefault(); return; }
   if (mode === 'menu' || paused) return;
   if (['KeyI', 'KeyM', 'Tab'].includes(e.code)) {
     e.preventDefault();
@@ -855,17 +885,26 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (inventoryOpen) return;
+  // PRIDA 0.40: build mode is a local presentation/input state; placement remains server-authoritative.
+  if (e.code === 'KeyX' && !e.repeat && !me()?.vehicle && !me()?.droneId) { buildMode040 = !buildMode040; toast(buildMode040 ? 'BUILD MODE · 1 WALL · 2 FLOOR · 3 RAMP · 4 ROOF' : 'BUILD MODE OFF', '#8fe0c0'); return; }
+  if (buildMode040) {
+    if (/^Digit[1-4]$/.test(e.code) && !e.repeat) { buildType040 = +e.code.slice(-1) - 1; return; }
+    if (e.code === 'KeyR' && !e.repeat) { buildRotation040 = (buildRotation040 + 1) % 4; return; }
+    if (e.code === 'KeyQ' && !e.repeat) { buildMaterial040 = (buildMaterial040 + 1) % BUILD_MATERIALS.length; return; }
+  }
   keys.add(e.code);
-  if (e.code === 'KeyR') reload = true;
-  if (e.code === 'KeyE' && !e.repeat) interact = true;
+  if (e.code === 'KeyR' && !buildMode040) reload = true;
+  if (e.code === 'KeyE' && !e.repeat) requestUse033();
   if (e.code === 'KeyH' && !e.repeat) heal = true;
-  if (e.code === 'KeyB' && !e.repeat) emote = true;
+  if (e.code === 'KeyB' && !e.repeat) { if (me()?.vehicle) bomb040 = true; else emote = true; }
+  if (e.code === 'KeyN' && !e.repeat) droneToggle040 = true;
+  if (e.code === 'KeyU' && !e.repeat) techUse040 = true;
   if (e.code === 'KeyV' && !e.repeat) dash = true;
   if (e.code === 'KeyJ' && !e.repeat && debugging()) openPanel('debugPanel');
   if (e.code === 'KeyT' && !e.repeat) toggleCameraView();
   if (e.code === 'Space' && !e.repeat) jump = true;
-  if (/^Digit[1-5]$/.test(e.code)) selectSlot(+e.code.slice(-1) - 1);
-  if (e.code === 'KeyQ' && !e.repeat) selectSlot(lastSlot);
+  if (/^Digit[1-5]$/.test(e.code) && !buildMode040) selectSlot(+e.code.slice(-1) - 1);
+  if (e.code === 'KeyQ' && !e.repeat && !me()?.vehicle && !buildMode040) selectSlot(lastSlot);
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener(
@@ -888,7 +927,7 @@ function releaseMouse() {
 }
 function canLook() {
   return (
-    mode !== 'menu' &&
+    !portalAdBusy() && mode !== 'menu' &&
     !paused &&
     !inventoryOpen &&
     !panel &&
@@ -1029,7 +1068,7 @@ const abilityTouch = [false, false];
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) $(sel).addEventListener(name, () => (abilityTouch[k] = false));
 });
 $('#touchReload').onclick = () => (reload = true);
-$('#interactBtn').onclick = () => (interact = true);
+$('#interactBtn').onclick = requestUse033;
 $('#emoteBtn').onclick = () => (emote = true);
 $('#dashBtn').onclick = () => (dash = true);
 $('#aimBtn').onclick = () => (holdingCharge() ? (detonate = true) : (aiming = !aiming));
@@ -1064,38 +1103,85 @@ $('#sprintBtn').addEventListener('pointerdown', (e) => {
 });
 for (const name of ['pointerup', 'pointercancel', 'lostpointercapture'])
   $('#sprintBtn').addEventListener(name, () => (sprintTouch = false));
+function requestUse033() {
+  const near = view?.map && nearLift(view.map,me());
+  if (!near?.inside) { interact = true; return; }
+  buildLiftPanel(near.lift, floor => {
+    closePanel(); pause(false); liftFloor033 = floor;
+  }, () => { closePanel(); pause(false); });
+  openPanel('liftPanel033');
+}
 function input() {
+  const player = me(), ride = player?.vehicle ? state.vehicles?.find(v => v.id === player.vehicle) : null;
   const right =
     move.x + (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
   const forward =
     -move.z + (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
   const world = relativeMove(right, forward, angle),
     // Third person: fire from the eye at what the crosshair is on, not parallel to the camera (render.js, aim.js).
-    fix = view?.aimFix;
+    fix = player?.vehicle || player?.droneId || player?.gear?.id === 'aegis' ? null : view?.aimFix,
+    active = canLook(), pressedFire = active && (touch ? fireTouch : mouse.down),
+    turbo = !!ride && ride.kind === 'tank' && ride.mods?.turbo,
+    suit = player?.gear?.id === 'aegis' && !player?.vehicle && !player?.droneId;
   return {
-    x: canLook() ? world.x : 0,
-    z: canLook() ? world.z : 0,
+    liftFloor: active ? liftFloor033 : undefined,
+    x: active ? world.x : 0,
+    z: active ? world.z : 0,
     angle: fix ? Math.atan2(Math.sin(angle + fix.angle), Math.cos(angle + fix.angle)) : angle,
     pitch: fix ? Math.max(-1.35, Math.min(1.35, pitch + fix.pitch)) : pitch,
-    fire: canLook() && (touch ? fireTouch : mouse.down),
+    fire: pressedFire,
+    buildMode: active && buildMode040 && !player?.vehicle && !player?.droneId && !suit,
+    buildPlace: active && buildMode040 && pressedFire,
+    buildType: buildType040,
+    buildRotation: buildRotation040,
+    buildMaterial: buildMaterial040,
+    droneToggle: active && droneToggle040,
+    suitToggle: false,
+    suitThrust: active && suit && (keys.has('Space') || flyUp),
+    suitAlt: active && suit && aiming,
+    techUse: active && techUse040,
+    bomb: active && bomb040,
+    turretAngle: view?.vehicleGunAim && view.vehicleGunAim.id === player?.vehicle ? view.vehicleGunAim.angle : angle,
+    turretPitch: view?.vehicleGunAim && view.vehicleGunAim.id === player?.vehicle ? view.vehicleGunAim.pitch : pitch,
+    drive: active ? Math.max(-1, Math.min(1, forward)) : 0,
+    steer: active ? Math.max(-1, Math.min(1, right)) : 0,
+    vehicleAlt: active && (aiming || vehicleTouch.alt),
+    vehicleRocket: active && !!player?.vehicle && (keys.has('KeyQ') || vehicleTouch.rocket),
+    vehicleBoost: active && turbo && keys.has('Space'),
+    vehicleBrake: active && (vehicleTouch.brake || (!!ride && keys.has('Space') && !turbo && ride.kind !== 'plane' && ride.kind !== 'helicopter')),
     reload: !paused && reload,
-    jump: canLook() && jump,
-    ascend: canLook()
-      ? (flyUp || keys.has('Space') ? 1 : 0) -
-        (flyDown || keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight') ? 1 : 0)
+    jump: active && jump && !turbo,
+    ascend: active
+      ? (flyUp || vehicleTouch.up || keys.has('Space') ? 1 : 0) -
+        (flyDown || vehicleTouch.down || keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight') ? 1 : 0)
       : 0,
-    interact: canLook() && interact,
-    detonate: canLook() && detonate,
-    heal: canLook() && heal,
-    emote: canLook() && emote,
-    dash: canLook() && dash,
-    ability1: canLook() && (keys.has('KeyF') || abilityTouch[0]),
-    ability2: canLook() && (keys.has('KeyG') || abilityTouch[1]),
-    sprint: canLook() && (sprintTouch || keys.has('ShiftLeft') || keys.has('ShiftRight')),
+    interact: active && interact,
+    detonate: active && detonate,
+    heal: active && heal,
+    emote: active && emote,
+    dash: active && dash,
+    ability1: active && (keys.has('KeyF') || abilityTouch[0]),
+    ability2: active && (keys.has('KeyG') || abilityTouch[1]),
+    sprint: active && (sprintTouch || keys.has('ShiftLeft') || keys.has('ShiftRight')),
     slot,
   };
 }
+function resetTechOneShots040() { droneToggle040 = suitToggle040 = techUse040 = bomb040 = false; }
 function handleEvent(e) {
+  if (e.type === 'lift-arrived' && me() && Math.hypot(e.x-me().x,e.z-me().z)<9 && Math.abs(e.y-me().y)<3)
+    tones([660,880],{type:'sine',vol:.025,dur:.07,gap:.06});
+  vehicleReport(audio, e, me(), sound);
+  if (e.id === id && e.type === 'vehicle-blocked') toast(e.why);
+  if (e.id === id && e.type === 'vehicle-serviced') toast('VEHICLE REPAIRED / REARMED');
+  if (e.id === id && e.type === 'tech-note') toast(e.text || 'NOVA TECH', '#79e9df');
+  if (e.id === id && e.type === 'tech-pickup') toast('NOVA EQUIPMENT ACQUIRED', '#79e9df');
+  if (e.id === id && e.type === 'build-placed') tones([220,330], {type:'triangle',vol:.018,dur:.05,gap:.025});
+  if (e.id === id && e.type === 'drone-launch') toast('FPV LINK ACTIVE · LMB DETONATE · N RETURN', '#75e5dc');
+  if (e.id === id && e.type === 'drone-end') toast(e.exploded ? 'FPV DETONATED' : 'FPV LINK ENDED', '#75e5dc');
+  if (e.id === id && e.type === 'bomb-release') toast('BOMB RELEASED', '#f0b46d');
+  if (e.type === 'door-blocked' && e.id === id) toast('DOOR BLOCKED', '#ffd39c');
+  if (e.type === 'door' && me() && Math.hypot(e.x-me().x, e.z-me().z)<12)
+    tones(e.open ? [170,240] : [230,140], {type:'triangle',vol:0.025,dur:0.075,gap:0.05});
   view.event(e);
   if (e.type === 'boss-down') {
     const b = BOSSES[e.kind],
@@ -1284,6 +1370,38 @@ function itemHud(p) {
   const html = chips.map(([k, n, t]) => `<span class="buff ${k}">${n} <b>${Math.ceil(t)}</b></span>`).join('');
   if ($('#buffs').innerHTML !== html) $('#buffs').innerHTML = html;
 }
+function updateTechHud040(p) {
+  if ((p.vehicle || p.droneId || p.gear?.id === 'aegis') && buildMode040) buildMode040 = false;
+  const ride = p.vehicle ? state.vehicles?.find(v=>v.id===p.vehicle) : null;
+  const build = !!buildMode040 && !p.vehicle && !p.droneId && p.gear?.id !== 'aegis';
+  show('#buildHud040', build);
+  if (build) {
+    const kind = BUILD_KINDS[buildType040] || 'wall', mat = BUILD_MATERIALS[buildMaterial040] || BUILD_MATERIALS[0], wallet=p.materials||{};
+    $('#buildName040').textContent = `BUILD · ${kind.toUpperCase()} · ROT ${buildRotation040*90}°`;
+    $('#buildMat040').textContent = `${mat.name} ${wallet[mat.id]||0} · COST ${mat.cost} · W ${wallet.wood||0} / B ${wallet.stone||0} / S ${wallet.metal||0}`;
+    $('#buildReason040').textContent = view?.technologyViews?.preview?.userData?.reason || 'LMB PLACE · R ROTATE · Q MATERIAL · X EXIT';
+  }
+  const drone = p.droneId && state.drones?.find(d=>d.id===p.droneId);
+  show('#droneHud040', !!drone);
+  if (drone) $('#droneStat040').textContent = `BAT ${Math.ceil(drone.battery)} S · SIG ${Math.round((drone.signal||0)*100)}% · HP ${Math.max(0,Math.ceil(drone.hp))}`;
+  const carry=[];
+  if(p.fpvCharges) carry.push(`FPV ×${p.fpvCharges}`);
+  for(const m of p.techModules||[]) carry.push(m.toUpperCase());
+  if(ride?.mods) for(const m of ['ram','turbo','bomb']) if(ride.mods[m]) carry.push(`${m.toUpperCase()} INSTALLED`);
+  show('#techCarry040', carry.length>0 && !build && !drone);
+  if(carry.length) $('#techCarry040').textContent = carry.join(' · ') + (p.techModules?.length && p.vehicle ? ' · U INSTALL' : '');
+  const aegis=p.gear?.id==='aegis'&&p.hp>0&&!p.vehicle&&!p.droneId;
+  show('#aegisHud040', aegis);
+  if(aegis){
+    const energy=Math.max(0,Math.min(100,p.gear?.fuel??0)), ground=view?.map ? Math.max(0,p.y-(view.map ? (view.map._height040?.(p.x,p.z) ?? 0) : 0)) : p.y;
+    $('#aegisEnergy040').textContent=Math.round(energy)+'%';$('#aegisEnergyBar040').style.width=energy+'%';
+    $('#aegisMode040').textContent=p.suitFlight?(p.sprinting?'BOOST FLIGHT':'FLIGHT'):'GROUND MODE';
+    $('#aegisAlt040').textContent=`ALT ${Math.max(0,Math.round(p.y))} · SPD ${Math.round(Math.hypot(p.suitVX||0,p.suitVZ||0)*3.6)} KM/H`;
+    $('#aegisBeam040').textContent=p.suitBeamCd>0?`BEAM COOL ${p.suitBeamCd.toFixed(1)} S`:`RMB BEAM ${Math.round((p.suitCharge||0)*100)}% · HOLD SPACE TO FLY`;
+  }
+  if (ride?.kind==='plane'&&ride.mods?.bomb) $('#reloadText').textContent=`BOMB ${ride.bombs||0} · B RELEASE`;
+  if (ride?.kind==='tank'&&ride.mods?.turbo) $('#reloadText').textContent=`TURBO ${Math.round(ride.boostEnergy||0)}% · HOLD SPACE`;
+}
 let lastHP = 100;
 function hud(dt) {
   if (state.winner !== null && inventoryOpen) toggleInventory(false);
@@ -1342,10 +1460,11 @@ function hud(dt) {
   const gear = p.gear && GEAR.find((g) => g.id === p.gear.id);
   show('#gearStatus', !!gear && p.gear.id !== 'shield');
   if (gear) {
-    $('#gearName').textContent = p.gliding ? 'GLIDING' : p.thrusting ? 'JETPACK · THRUST' : gear.name;
+    $('#gearName').textContent = p.gear?.id==='aegis' ? (p.suitFlight?'AEGIS · FLIGHT':'AEGIS · HOLD SPACE') : p.gliding ? 'GLIDING' : p.thrusting ? 'JETPACK · THRUST' : gear.name;
     $('#gearBar').style.width = (gear.fuel ? (p.gear.fuel / gear.fuel) * 100 : 100) + '%';
   }
   updateInventoryHUD(p);
+  updateTechHud040(p);
   itemHud(p);
   ambience(p);
   if (p.hp < lastHP - 1) {
@@ -1535,10 +1654,20 @@ function updateInventoryHUD(p) {
   }
   const vest = p.armorTier ? ARMOR_TIERS.find((a) => a.id === p.armorTier) : null;
   $('#armorLabel').textContent = `MEDKITS ${p.medkits}${vest ? ' · ' + vest.name.toUpperCase() : ''}`;
-  const near = (state.chests || []).filter(
+  const lab = !p.vehicle && !p.droneId ? (state.labItems || []).filter(
+    (item) => item.available && Math.hypot(item.x - p.x, item.z - p.z) < 2.7 && Math.abs((item.y || 0) - (p.y || 0) - 1) < 2.2 && lineClear({x:p.x,y:p.y+1.55,z:p.z}, item, 0, view.map.obstacles),
+  ).sort((a,b)=>Math.hypot(a.x-p.x,a.y-p.y,a.z-p.z)-Math.hypot(b.x-p.x,b.y-p.y,b.z-p.z))[0] : null;
+  const near = lab ? null : (state.chests || []).filter(
     (c) => !c.opened && Math.hypot(c.x - p.x, c.z - p.z) < 2.8 && Math.abs((c.y || 0) - (p.y || 0)) < 1.8 && lineClear(p, c, 0, view.map.obstacles),
   )[0];
-  show('#lootPrompt', !!near && !inventoryOpen && p.hp > 0 && state.winner === null);
+  const lift = p.vehicle || lab ? null : nearLift(view.map,p);
+  const door = p.vehicle || lift || lab ? null : nearestDoor(view.map, p);
+  const vehicle = !door && !lift && !lab && !p.vehicle ? nearestVehicle(view.map, p, view.map.vehicles) : null;
+  show('#lootPrompt', !!(lab || lift || door || near || vehicle || p.vehicle) && !inventoryOpen && p.hp > 0 && state.winner === null);
+  if (lab) {
+    $('#lootPrompt').textContent = (touch ? 'TAP USE · ' : 'E · ') + 'TAKE ' + (lab.label || lab.kind || 'NOVA TECH');
+    $('#lootPrompt').style.borderColor = '#75e5dc';
+  }
   if (near) {
     const what =
       near.kind === 'drop'
@@ -1557,7 +1686,21 @@ function updateInventoryHUD(p) {
     $('#lootPrompt').textContent = (touch ? '' : 'E · ') + what;
     $('#lootPrompt').style.borderColor = near.kind === 'drop' && near.loot ? rarityColor(near.loot.r) : 'transparent';
   }
-  $('#interactBtn').disabled = !near;
+  if (door) {
+    $('#lootPrompt').textContent = (touch ? 'TAP USE · ' : 'E · ') + (door.open ? 'CLOSE DOOR' : 'OPEN DOOR') + (door.label ? ' / ' + door.label.slice(0,48) : '');
+    $('#lootPrompt').style.borderColor = '#dfc599';
+  }
+  if (vehicle || p.vehicle) {
+    $('#lootPrompt').textContent = (touch ? 'TAP USE · ' : 'E · ') + (p.vehicle ? 'EXIT VEHICLE' : 'ENTER ' + vehicle.kind.toUpperCase());
+    $('#lootPrompt').style.borderColor = '#d8c58d';
+  }
+  if (lift) {
+    $('#lootPrompt').textContent = (touch ? 'TAP USE · ' : 'E · ') + (lift.inside ? 'SELECT LIFT FLOOR' : 'CALL LIFT / FLOOR '+lift.floor);
+    $('#lootPrompt').style.borderColor = '#a5dac4';
+  }
+  $('#interactBtn').disabled = !lab && !lift && !near && !door && !vehicle && !p.vehicle;
+  $('#interactBtn small').textContent = lab ? 'TECH' : lift ? 'LIFT' : p.vehicle ? 'EXIT' : vehicle ? 'DRIVE' : door ? 'DOOR' : 'LOOT';
+  $('#interactBtn').setAttribute('aria-label', lab ? 'Take NOVA technology' : door ? (door.open ? 'Close door' : 'Open door') : 'Open supply chest');
   if (p.healing > 0) $('#reloadText').textContent = `HEALING ${p.healing.toFixed(1)} s`;
   if (!inventoryOpen) return;
   $('#inventoryNote').textContent =
@@ -1566,7 +1709,7 @@ function updateInventoryHUD(p) {
       : 'Paused. Equipment lasts until the match ends.';
   const gear = p.gear && GEAR.find((g) => g.id === p.gear.id);
   $('#supplyText').textContent =
-    `Medkits: ${p.medkits} / 5 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'}`;
+    `Medkits: ${p.medkits} / 5 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'} · Build: W${p.materials?.wood||0}/B${p.materials?.stone||0}/S${p.materials?.metal||0} · FPV ${p.fpvCharges||0} · Modules ${(p.techModules||[]).join(', ')||'none'}`;
   $('#healBtn').disabled = p.medkits === 0 || p.hp >= 100;
   const key = JSON.stringify([p.slots, p.slot, p.relic?.id]);
   if (key !== inventoryKey) {
@@ -1671,12 +1814,14 @@ function predicted(dt) {
   if (mode !== 'online') return state;
   const shown = interp.apply(state, id),
     me = state.players.find((p) => p.id === id);
-  if (!me || me.hp <= 0 || me.inBus || me.dropping || me.gliding || me.launched || me.push || me.frozen > 0 || me.cheats?.flight || !view?.map) {
+  if (!me || me.hp <= 0 || me.escalator || me.lift || me.vehicle || me.inBus || me.dropping || me.gliding || me.launched || me.push || me.frozen > 0 || me.cheats?.flight || !view?.map) {
     predictor.idle(me);
     return shown;
   }
   const pos = predictor.position(me, view.map, predictCtx(me), dt);
   if (!pos) return shown;
+  const contact = sweepVehicleContacts(view.map, me, {x:pos.x-me.x,y:pos.y-me.y,z:pos.z-me.z});
+  Object.assign(pos,{x:me.x+contact.x,y:me.y+contact.y,z:me.z+contact.z});
   return { ...shown, players: shown.players.map((p) => (p.id === id ? { ...p, x: pos.x, y: pos.y, z: pos.z } : p)) };
 }
 // ---- Lobby stage ---------------------------------------------------------------------------------
@@ -1776,16 +1921,17 @@ function frame(t) {
   let dt = Math.min((t - last) / 1000 || 0, 0.1);
   last = t;
   acc += dt;
-  if (mode === 'training' && !paused && !inventoryOpen && !panel) {
+  if (mode === 'training' && !portalAdBusy() && !paused && !inventoryOpen && !panel) {
     while (acc >= 1 / 60) {
       sim.input(id, input());
       sim.step();
       jump = false;
-      interact = false;
+      interact = false; liftFloor033 = undefined;
       detonate = false;
       heal = false;
       emote = false;
       dash = false;
+      resetTechOneShots040();
       acc -= 1 / 60;
     }
     state = sim.snapshot();
@@ -1805,14 +1951,22 @@ function frame(t) {
       netTimer = 0;
       reload = false;
       jump = false;
-      interact = false;
+      interact = false; liftFloor033 = undefined;
       detonate = false;
       heal = false;
       emote = false;
       dash = false;
+      resetTechOneShots040();
     }
   }
   const player = state.players.find((p) => p.id === id);
+  const flight = player?.vehicle && state.vehicles?.find(v => v.id === player.vehicle && v.kind === 'plane');
+  // Set a useful initial view once, but never overwrite ongoing mouse control from server state.
+  if (frame.vehicleLookId !== (player?.vehicle || null)) {
+    frame.vehicleLookId = player?.vehicle || null;
+    const ride = player?.vehicle && state.vehicles?.find(v => v.id === player.vehicle);
+    if (ride) { angle = ride.angle; pitch = ride.kind === 'plane' ? ride.pitch || 0 : 0; }
+  }
   const alive = !!player && player.hp > 0;
   if (mode !== 'menu' && previousAlive !== null && alive !== previousAlive) {
     clearInput();
@@ -1832,8 +1986,15 @@ function frame(t) {
     spectated?.id || id,
     mode === 'training' && (paused || inventoryOpen || panel) ? 0 : dt,
     mode === 'menu',
-    { angle: spectated?.angle ?? angle, pitch: spectated?.pitch ?? pitch, aim: aiming },
+    {
+      angle: spectated?.angle ?? angle,
+      pitch: spectated?.pitch ?? pitch,
+      aim: aiming && !player?.vehicle && !player?.droneId && player?.gear?.id !== 'aegis',
+      build: { mode: buildMode040, type: buildType040, rotation: buildRotation040, material: buildMaterial040 },
+    },
   );
+  updateVehicleHUD(state, player, view, mode === 'menu', paused || inventoryOpen || !!panel);
+  engineSound(audio, player?.vehicle ? state.vehicles?.find(v => v.id === player.vehicle) : null, sound && mode !== 'menu' && !paused);
   if (mode !== 'menu') hud(dt);
   else ambience(null);
   requestAnimationFrame(frame);
@@ -1881,7 +2042,7 @@ function saveProfile(upload = true) {
     saveAvailable = false;
   }
   updateWallet();
-  if (upload && account) queueProfileUpload();
+  if (upload && account && !portalMode()) queueProfileUpload();
 }
 // ---- Accounts (0.23): the profile and the friend list on the PRIDA server --------------------------------------
 // The server is the one this page plays online against (never a made-up address); without one, progress stays on
@@ -1933,6 +2094,7 @@ function accountStatus(text) {
   $('#accountStatus').textContent = text || '';
 }
 function queueProfileUpload() {
+  if (portalMode()) return;
   clearTimeout(uploadTimer);
   uploadTimer = setTimeout(async () => {
     try {
@@ -1959,6 +2121,7 @@ function refreshProfileUI() {
   if (menuTab === 'loadout') renderLoadoutPanel();
 }
 function renderAccount() {
+  if (portalMode()) { portalUi035?.render(); return; }
   $('#accountBtn').textContent = account ? account.name : 'LOG IN';
   show('#accountOut', !account);
   show('#accountIn', !!account);
@@ -2016,6 +2179,7 @@ function renderGroupFriends() {
 }
 // Friends online and group invites: while signed in, one small socket to the server (see server.mjs).
 function openPresence() {
+  if (portalMode()) return;
   clearTimeout(presenceTimer);
   if (presence || !account?.token) return;
   let url;
@@ -2104,6 +2268,7 @@ async function friendAction(body) {
   }
 }
 async function signIn(register) {
+  if (portalMode()) return;
   const name = $('#accName').value.trim(),
     password = $('#accPass').value;
   accountStatus(register ? 'Creating your account…' : 'Logging in…');
@@ -2134,6 +2299,7 @@ async function signIn(register) {
 // On start, a signed-in device takes the account's progress if it was saved more recently elsewhere, and sends its
 // own otherwise.
 async function syncAccount() {
+  if (portalMode()) return;
   if (!account || !apiBase()) return;
   try {
     const me = await api('GET', '/api/me');
@@ -2155,6 +2321,7 @@ async function syncAccount() {
   }
 }
 async function openAccount() {
+  if (portalMode()) { openPanel('accountPanel'); portalUi035?.render(); return; }
   openPanel('accountPanel');
   renderAccount();
   $('#accountStore').textContent = '';
@@ -2383,7 +2550,7 @@ function renderDebugPanel() {
     .querySelectorAll('[data-give]')
     .forEach((el) => (el.onclick = () => debugGive({ weapon: +el.dataset.give, rarity: r(), ammo: true })));
   $('#debugGear').innerHTML =
-    GEAR.map((g) => `<button data-gear="${g.id}"><img src="./icons/${g.model}.png" alt=""><b>${g.name}</b></button>`).join('') +
+    GEAR.map((g) => `<button data-gear="${g.id}"><img src="./icons/${g.icon || g.model+'.png'}" alt=""><b>${g.name}</b></button>`).join('') +
     '<button data-gear=""><b>NO GEAR</b></button>';
   $('#debugGear')
     .querySelectorAll('[data-gear]')
@@ -2400,6 +2567,16 @@ function renderDebugPanel() {
       applyCheats();
     };
   }
+}
+document.addEventListener('prida-vehicle-action', e => {
+  if (!canLook()) return;
+  if (e.detail === 'use') interact = true;
+  if (e.detail === 'service') reload = true;
+});
+for (const [poi, label] of [['fort','NW / FORT NORTH'],['solara','NW / VILLA SOLARA'],['vista','NW / VILLA VISTA'],['q1:fort','NE / FORT NORTH'],['q2:fort','SW / FORT NORTH'],['q3:fort','SE / FORT NORTH'],['mall','GLASS ARCADE'],['bank','CIVIC BANK'],['courtyard','COURT GARDENS'],['terraces','TERRACE HOUSE']]) {
+  const button = document.createElement('button');button.className='secondary';button.type='button';button.textContent='TRAVEL / '+label;
+  $('#debugPanel .inventory-card').append(button);
+  button.onclick = () => { if (debugging() && sim.debugTravel(id, poi)) {closePanel();angle=Math.PI;pitch=0;} };
 }
 $('#debugBtn').onclick = () => openPanel('debugPanel');
 $('#debugAmmo').onclick = () => debugGive({ ammo: true });
@@ -2418,6 +2595,7 @@ $('#debugClearBots').onclick = () => {
   renderDebugPanel();
 };
 function openPanel(name) {
+  if ((name === 'cheatPanel' || name === 'debugPanel') && !developerMode()) return;
   if (mode !== 'menu') pause(true);
   closePanel();
   panelFocus = document.activeElement;
@@ -2581,6 +2759,7 @@ function updateCheatPanel() {
 }
 $('#codeForm').onsubmit = (e) => {
   e.preventDefault();
+  if (!developerMode() || mode === 'online') return;
   if ($('#cheatCode').value === '250886') {
     cheatUnlocked = true;
     $('#cheatCode').value = '';
@@ -2591,6 +2770,7 @@ $('#codeForm').onsubmit = (e) => {
   } else $('#codeMessage').textContent = 'Incorrect code.';
 };
 function grantBazooka() {
+  if (!developerMode()) return;
   if (mode === 'online') {
     toast('Cheats are disabled in online matches.');
     return;
@@ -2602,6 +2782,7 @@ function grantBazooka() {
   toast(sim?.allowCheats ? 'COMET rocket launcher unlocked · slot 4' : 'Rocket launcher ready for your next solo match');
 }
 function applyCheats() {
+  if (!developerMode()) return;
   if (!sim?.allowCheats) return;
   for (const key of Object.keys(cheatSettings)) sim.setCheat(id, key, cheatSettings[key]);
 }
@@ -2621,18 +2802,63 @@ $('#resetCheats').onclick = () => {
   applyCheats();
   updateCheatPanel();
 };
+mountDeveloperSettings();
+const debugAmmo033 = document.createElement('button');
+debugAmmo033.id = 'debugInfinite033'; debugAmmo033.className = 'secondary';
+debugAmmo033.dataset.developerOnly = ''; debugAmmo033.type = 'button';
+debugAmmo033.textContent = 'INFINITE AMMO + VEHICLE ROCKETS: OFF';
+debugAmmo033.onclick = () => {
+  if (!debugging()) return;
+  const p = sim.players.find(p => p.id === id); if (!p) return;
+  const enabled = !p.cheats.infinite;
+  if (sim.setCheat(id, 'infinite', enabled)) {
+    cheatSettings.infinite = enabled;
+    const checkbox = document.getElementById('debugInfinite'); if (checkbox) checkbox.checked = enabled;
+    debugAmmo033.textContent = 'INFINITE AMMO + VEHICLE ROCKETS: ' + (enabled ? 'ON' : 'OFF');
+    state = sim.snapshot();
+  }
+};
+document.querySelector('#debugPanel .debug-card')?.append(debugAmmo033);
+document.addEventListener('prida-developer-change', e => {
+  if (e.detail === true) { if (sim && mode !== 'online') sim.allowCheats = true; return; }
+  for (const key of Object.keys(cheatSettings)) { cheatSettings[key] = false; if (sim?.allowCheats) sim.setCheat(id,key,false); }
+  if (sim) sim.allowCheats = false;
+  cheatUnlocked = false; cheatBuffer = '';
+  debugAmmo033.textContent = 'INFINITE AMMO + VEHICLE ROCKETS: OFF';
+  if (panel === 'cheatPanel' || panel === 'debugPanel') closePanel();
+});
 async function boot() {
   try {
     await Promise.all([
       initPhysics(),
       loadAssets((n, total) => ($('#loadStatus').textContent = `Loading models ${n} / ${total}…`)),
       initSDK(),
+      loadVehicleModels(),
     ]);
     try {
-      saveStore = portalStorage() || localStorage;
+      saveStore = portalMode() ? portalStorage() : localStorage;
+      if (!saveStore && portalMode()) throw new Error('CrazyGames Data is unavailable. Enable SDK Data in the Developer Portal.');
       profile = readProfile(saveStore.getItem('prida-profile-v1'));
-    } catch {
+    } catch (error) {
+      if (portalMode()) throw error;
       saveAvailable = false;
+    }
+    mountPortalExportLinks();
+    if (portalMode()) {
+      closePresence(); account = null; clearTimeout(uploadTimer);
+      portalUi035 = createPortalUI({
+        getProfile: () => profile,
+        writeProfile: next => { if (!saveStore) throw new Error('No save store'); saveStore.setItem('prida-profile-v1',JSON.stringify(next)); profile=next; refreshProfileUI(); },
+        isLobby: () => mode === 'menu' && !group,
+        onIdentityChange: () => { // SDK Data changes account scope; never merge another account's local profile.
+          disconnect(); sim?.dispose(); location.reload();
+        },
+        clearInput, releaseMouse,
+        mute: on => {
+          if(on){portalSound035={enabled:sound,running:audio?.state==='running'};sound=false;audio?.suspend().catch(()=>{});}
+          else if(portalSound035){sound=portalSound035.enabled;if(portalSound035.running)audio?.resume().catch(()=>{});portalSound035=null;}
+        },
+      });
     }
     view = await startView();
     const safe = safeGraphics();
@@ -2675,6 +2901,7 @@ async function boot() {
     if (serverEndpoint()) $('#serverNote').textContent = 'Connected to this site’s PRIDA server. You can also enter another address.';
     renderAccount();
     syncAccount();
+    portalLoading(false);
     show('#loading', false);
     show('#menu', true);
     offerTutorial();

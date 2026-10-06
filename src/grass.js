@@ -1,3 +1,4 @@
+import { waterLevelAt } from './landscape.js';
 // 3D grass around the camera: instanced patches of curved blades on every lawn, park, glade and meadow (not on
 // roads, pavements, paths, water, sand or under buildings). Blades sway in the wind, bend away from players and
 // shrink away at the edge of the ring so there is no hard border. A 1 m density mask is built once per map;
@@ -214,6 +215,11 @@ export class GrassField {
     for (const w of map.waters) this.rect(w, 0.6);
     for (const o of map.obstacles)
       if (['rock', 'log', 'hay', 'crate', 'pond', 'bench', 'cactus'].includes(o.part)) this.rect(o, o.part === 'rock' ? -0.1 : 0.1);
+    // Open courtyards are not covered by the rectangular building's grass mask.
+    for (const b of map.buildings) if (b.landmark034 === 'courtyard') {
+      this.fill(b.x-1.3,b.z-b.d/2+.8,b.x+2.8,b.z+3.3,(i)=>{this.density[i]=130;this.biome[i]=city;});
+    }
+    for (const o of map.siteObjects || []) if (o.visual && ['concrete','paving','asphalt','water'].includes(o.surface)) this.rect(o,.08);
     // Chests stay visible.
     for (const c of map.chests) this.rect({ x: c.x, z: c.z, w: 1.6, d: 1.2 }, 0.3);
   }
@@ -265,6 +271,7 @@ export class GrassField {
           const i = this.cell(x, z);
           if (i < 0) continue;
           const dens = this.density[i];
+          if (this.ground(i,x,z) <= waterLevelAt(x,z,this.map)+.035) continue;
           if (!dens) continue;
           const far = d > this.near ? 1 : 0;
           if (far && (Math.floor(x) + Math.floor(z)) & 1) continue;

@@ -1,3 +1,15 @@
+import { addBaseDroneStations } from './base-drones.js';
+import { configureLaboratory, furnishLaboratories } from './laboratory-world.js';
+import { configureLandmarkLots, buildLandmark } from './landmark-world.js';
+import { addMobilityRelief, addMobilitySites } from './mobility-world.js';
+import { configureLandscape, settleLandscape } from './landscape.js';
+import { dressLandmarks } from './landscape-dressing.js';
+import { assignInteriorPlan, buildInterior } from './interior-world.js';
+import { tileCity } from './world-tiles.js';
+import { detailSites } from './world-detail.js';
+import { addExpansionPlots } from './expansion-plan.js';
+import { addExpansionProps, prepareVehicleSpawns } from './expansion-world.js';
+import { prepareArchitecture } from './architecture-world.js';
 import { BUILDING_TYPES, WEAPONS } from './catalog.js';
 import { rollChest, LOOT_WEAPONS } from './items.js';
 import { ObstacleGrid, isLowSolid } from './spatial.js';
@@ -27,7 +39,8 @@ export function stairLane(b, storey) {
 }
 // Roof of a building: pitched on homes, sheds and saw-tooth on some industry, flat (with a parapet) elsewhere.
 export function roofStyle(b) {
-  if (b.category === 'home') return Math.abs(b.w - b.d) < 3.5 && (b.id + b.w) % 3 === 0 ? 'hip' : 'gable';
+  if (b.sourceId !== undefined) b = { ...b, id: b.sourceId };
+  if (b.category === 'home') return b.id % 3 === 1 ? 'hip' : 'gable';
   if (b.category === 'industry') return ['warehouse', 'hangar'].includes(b.type) ? 'shed' : ['factory', 'workshop'].includes(b.type) ? 'saw' : 'flat';
   return 'flat';
 }
@@ -35,6 +48,7 @@ export function roofStyle(b) {
 export const roofTop = (b) => (b.height - b.roofBase > 0.3 ? b.height : b.roofBase);
 // Smokestack of the big industrial buildings (the chimney smoke rises from its top).
 export function chimneyOf(b) {
+  if (b.sourceId !== undefined) b = { ...b, id: b.sourceId };
   if (b.category !== 'industry' || b.height < 9) return null;
   return { x: b.x + b.w * 0.25, z: b.z - b.d * 0.2, base: b.roofBase, top: roofTop(b) + 6 + (b.id % 3) * 1.5, r: 0.85 };
 }
@@ -43,6 +57,7 @@ export function chimneyOf(b) {
 // from its own random stream: roofs.js draws it and createWorld gives every piece a collision box (roofPlantBoxes),
 // so it is the same on every client and on the server.
 export function roofPlan(b) {
+  if (b.sourceId !== undefined) b = { ...b, id: b.sourceId };
   const rnd = seededRandom(0x51f15e + b.id * 977),
     style = roofStyle(b),
     plan = { style, items: [], stack: chimneyOf(b) };
@@ -338,6 +353,11 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
         vertical.has(c + ',' + (r - 1))
       )
         roads.push({ x: X0 + c * 24, z: Z0 + r * 26, w: 6, d: 6 });
+  addExpansionPlots(map);
+  configureLandmarkLots(map);
+  configureLaboratory(map);
+  configureLandscape(map);
+  addMobilityRelief(map);
   for (const lot of plots.filter((p) => p.type === 'building')) {
     const kind = lot.kind,
       w = kind.w,
@@ -355,6 +375,8 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
         door: lot.cells.length > 1 || kind.category === 'industry' ? 4.4 : 3.2,
       };
     buildings.push(b);
+    if (buildLandmark(map,b)) { buildInterior(map,b); continue; }
+    assignInteriorPlan(b);
     const add = (x, y, z, w, h, d, part, color = b.color, extra = {}) => {
       const o = { x, y, z, w, h, d, part, building: b.id, color, ...extra };
       obstacles.push(o);
@@ -410,7 +432,7 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     }
     for (const fz of [-1, 1]) {
       const z = b.z + fz * (d / 2 - 0.2),
-        wing = (w - b.door) / 2,
+        wing = (w - 0.8 - b.door) / 2,
         n = split(wing),
         next = [];
       for (const side of [-1, 1])
@@ -524,7 +546,7 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
         }
       }
       // Flats: a partition between the corridor and the flats (with a doorway to each) and one between flats.
-      const flats = apartmentPlan(b);
+      const flats = b.interiorPlan ? null : apartmentPlan(b);
       if (flats) {
         const wx = b.x + flats.wallX,
           part = (x, z, pw, pd) =>
@@ -566,12 +588,14 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
       top = base + STOREY_HEIGHT;
     }
     b.roofBase = top;
+    // A pitched hull is always above its last ceiling and has a meaningful rise.
+    if (roofStyle(b) !== 'flat') b.height = Math.max(b.height, top + (roofStyle(b) === 'shed' ? 1.52 : 1.72));
     if (b.height - top > 0.3)
       add(b.x, (b.height + top) / 2, b.z, w, b.height - top, d, 'upper', b.accent, {
         storey: (b.storeys || 0) + 1,
         hp: Math.round(90 + w * d * 0.45),
       });
-    if (lot.cells.length > 1) {
+    if (lot.cells.length > 1 && !b.interiorPlan) {
       for (const side of [-1, 1])
         for (const t of [-0.28, 0.28]) {
           const pw = w * 0.22,
@@ -579,9 +603,10 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
           o.y = 1.2;
         }
     }
+    buildInterior(map,b);
     // Walkway from door to door stays clear of furniture.
-    keepOut.push({ x: b.x, z: b.z, w: b.door + 1.6, d: d + 5 });
-    spawns.push([b.x, b.z]);
+    keepOut.push({ x: b.x, z: b.z, w: b.interiorPlan ? Math.min(3.60, Math.max(2.6, b.door + .30)) : b.door + 1.6, d: d + 5 });
+    if (!b.poi) spawns.push([b.x, b.z]);
     // Where a chest may stand by the door (0.27: not every building gets one, see below).
     b.chestSpot = { x: b.x + 1.9, z: b.z + d / 2 - 1.3 };
   }
@@ -675,12 +700,17 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
       map.cover.push(c);
     }
   // Trees, rocks, crates and park benches can be destroyed too; `prop` ids let clients mirror that.
-  const PROP_HP = { tree: 120, rock: 240, crate: 90, bench: 70, stair: 90, cactus: 80, hay: 110, log: 130, glass: 1 };
+  addExpansionProps(map);
+  if (size === 'city') detailSites(map, groundHeight);
+  settleLandscape(map, groundHeight);
+  if (size === 'city') dressLandmarks(map,groundHeight);
+  addMobilitySites(map,groundHeight);
+  const PROP_HP = { site: 160, tree: 120, rock: 240, crate: 90, bench: 70, stair: 90, cactus: 80, hay: 110, log: 130, glass: 1 };
   let propId = 0;
   for (const o of obstacles)
     if (PROP_HP[o.part]) {
       o.prop = propId++;
-      o.hp = PROP_HP[o.part];
+      o.hp ??= PROP_HP[o.part];
     }
   for (const o of obstacles)
     if (o.part === 'bench-back') o.prop = obstacles.find((q) => q.part === 'bench' && Math.abs(q.x - o.x) < 0.01 && Math.abs(q.z - o.z + 0.26) < 0.01)?.prop;
@@ -694,7 +724,7 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
   // never shifts.
   const chestRand = seededRandom(seed ^ 0x27d4eb2d),
     roofy = buildings
-      .filter((b) => b.chestSpot && roofStyle(b) === 'flat' && (b.storeys || 0) >= 1 && b.w >= 8 && b.d >= 8)
+      .filter((b) => !b.landmark034 && b.chestSpot && roofStyle(b) === 'flat' && (b.storeys || 0) >= 1 && b.w >= 8 && b.d >= 8)
       .sort((a, c) => c.height - a.height || a.id - c.id),
     legendary = new Set(roofy.slice(0, size === 'city' ? 5 : 2).map((b) => b.id));
   for (const b of buildings) {
@@ -726,12 +756,22 @@ export function createWorld(seed = DEFAULT_SEED, size = 'district') {
     for (let z = -map.limit.z; z <= map.limit.z; z += 2) top = Math.max(top, rawHeight(x, z, map));
   map.maxTerrainHeight = top + 0.1;
   placeDecor(map, keepOut, seededRandom(seed ^ 0x2545f491), levelKeepOut);
+  furnishLaboratories(map);
+  addBaseDroneStations(map);
   // Everything on the roofs is solid (0.28): parapets, plant, chimneys and smokestacks stop players, bullets and the
   // camera. They go with the roof when it is blown off or the building comes down.
   for (const b of buildings)
-    for (const r of roofPlantBoxes(b))
+    for (const r of (b.landmark034 ? [] : roofPlantBoxes(b)))
       obstacles.push({ ...r, part: 'roofplant', building: b.id, storey: (b.storeys || 0) + 1, color: 0x9aa0a4 });
   for (const p of plots) delete p.kind;
+  prepareVehicleSpawns(map);
+  prepareArchitecture(map, roofStyle);
+  if (size === 'city') {
+    const tiled = tileCity(map);
+    tiled.obstacles.grid = new ObstacleGrid(tiled.obstacles, tiled.limit);
+    tiled.obstacles.lowGrid = new ObstacleGrid(tiled.obstacles.filter(isLowSolid), tiled.limit, 8, '_lowStamp');
+    return tiled;
+  }
   map.obstacles.grid = new ObstacleGrid(map.obstacles, map.limit);
   map.obstacles.lowGrid = new ObstacleGrid(map.obstacles.filter(isLowSolid), map.limit, 8, '_lowStamp');
   return map;
