@@ -132,8 +132,11 @@ export function detailMaterial(name, color, { strength = 0.6, roughness = 0.9, k
         detailNormal: { value: normalMap || map },
         detailArm: { value: armMap || map },
         detailMean: { value: linear(TEXTURES[name]) },
+        insideMap: { value: texture('plaster') || map },
+        insideNormal: { value: texture('plaster_n') || normalMap || map },
+        insideMean: { value: linear(TEXTURES.plaster) },
         detailScale: { value: 1 / look.size },
-        detailStrength: { value: Math.max(strength, 0.85) },
+        detailStrength: { value: Math.min(1, Math.max(0, strength)) },
         detailAlbedo: { value: albedo ?? look.albedo },
         detailTint: { value: look.tint },
         detailNormalScale: { value: normalMap ? look.normal : 0 },
@@ -174,6 +177,9 @@ export function detailMaterial(name, color, { strength = 0.6, roughness = 0.9, k
           uniform vec3 detailMean;uniform float detailScale;uniform float detailStrength;uniform float detailAlbedo;
           uniform float detailTint;uniform float detailNormalScale;uniform float detailRough;uniform float detailMetal;
           varying vec3 vDetailPos;varying vec3 vDetailNormal;
+          #ifdef DETAIL_INTERIOR
+            uniform sampler2D insideMap;uniform sampler2D insideNormal;uniform vec3 insideMean;
+          #endif
           #ifdef DETAIL_INTERIOR
             varying vec3 vOut;
           #endif
@@ -218,9 +224,13 @@ export function detailMaterial(name, color, { strength = 0.6, roughness = 0.9, k
           diffuseColor.rgb *= mix(1.0, dAO, 0.35);
           float dInner = 0.0;
           #if defined( DETAIL_INTERIOR ) && defined( DETAIL_BOX )
-            // Inside faces of outer walls: smooth painted plaster, lighter where the facade is dark.
+            // A single fragment chooses exterior finish OR painted plaster. No extra wall overlay.
             dInner = step(0.5, -dot(dN, vOut));
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.79, 0.76, 0.70) * (0.97 + 0.03 * sin(dot(vDetailPos, vec3(1.3, 0.7, 1.1)))), dInner);
+            vec2 iUV = (dAbs.x >= dAbs.z ? vDetailPos.zy : vDetailPos.xy) / 1.35;
+            if (dInner > 0.5) {
+              vec3 grain = clamp(texture2D(insideMap, iUV).rgb / insideMean, 0.65, 1.4);
+              diffuseColor.rgb = vec3(0.66, 0.64, 0.60) * mix(vec3(1.0), grain, 0.35);
+            }
             dAO = mix(dAO, 1.0, dInner);
             dArmMix *= 1.0 - dInner;
           #endif
@@ -250,7 +260,10 @@ export function detailMaterial(name, color, { strength = 0.6, roughness = 0.9, k
           if (detailNormalScale > 0.0) {
             #ifdef DETAIL_BOX
               vec3 nt = texture2D(detailNormal, dUV).xyz * 2.0 - 1.0;
-              nt.xy *= detailNormalScale * (1.0 - dInner);
+              nt.xy *= detailNormalScale;
+              #ifdef DETAIL_INTERIOR
+                if (dInner > 0.5) { nt = texture2D(insideNormal, iUV).xyz * 2.0 - 1.0; nt.xy *= 0.4; }
+              #endif
               vec3 worldN = normalize(dT * nt.x + dBt * nt.y + dN * max(nt.z, 0.05));
             #else
               // Triplanar normal mapping with a whiteout blend (after Ben Golus), done in world space.
@@ -275,7 +288,7 @@ export function detailMaterial(name, color, { strength = 0.6, roughness = 0.9, k
         );
     };
     // The shader source only depends on these flags (the texture set is a uniform): every surface shares it.
-    material.customProgramCacheKey = () => 'pbr' + (ceiling ? ':ceiling' : '');
+    material.customProgramCacheKey = () => 'pbr-v029' + (ceiling ? ':ceiling' : '');
   }
   detailCache.set(id, material);
   return material;
@@ -294,8 +307,8 @@ export const BIOME_COLORS = {
   glade: 0x8fb86c,
   meadow: 0x9cbc68,
 };
-export function makeGround(map) {
-  const { vertices, indices } = terrainMesh(map),
+export function makeGround(map, bounds = null) {
+  const { vertices, indices } = terrainMesh(map, bounds),
     colors = new Float32Array(vertices.length);
   const c = new T.Color();
   for (let i = 0; i < vertices.length; i += 3) {
@@ -334,6 +347,7 @@ export function makeGround(map) {
       sandMap: { value: tex('sand') },
       sandN: { value: tex('sand_n') || tex('sand') },
       dirtMap: { value: tex('dirt') },
+      mountainMap034: { value: tex('rock') || tex('sand') },
       grassMean: { value: linear(TEXTURES.grass) },
       sandMean: { value: linear(TEXTURES.sand) },
       hasNormals: { value: tex('grass_n') && !liteSurfaces ? 1 : 0 },
@@ -351,7 +365,7 @@ export function makeGround(map) {
         `#include <common>
         varying vec3 vTerrainWorld;varying float vSandy;
         uniform sampler2D grassMap;uniform sampler2D grassN;uniform sampler2D grassArm;uniform sampler2D sandMap;uniform sampler2D sandN;uniform sampler2D dirtMap;
-        uniform vec3 grassMean;uniform vec3 sandMean;uniform float hasNormals;
+        uniform vec3 grassMean;uniform vec3 sandMean;uniform float hasNormals;uniform sampler2D mountainMap034;
         float surfaceHash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
         float valueNoise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
           return mix(mix(surfaceHash(i),surfaceHash(i+vec2(1,0)),f.x),mix(surfaceHash(i+vec2(0,1)),surfaceHash(i+vec2(1,1)),f.x),f.y);}`,
@@ -373,6 +387,11 @@ export function makeGround(map) {
         vec3 natural = mix(g * mix(vec3(1.0), tintColor / max(grassMean, vec3(0.02)) * 0.55, 0.6),
                            sd * mix(vec3(1.0), tintColor / max(sandMean, vec3(0.02)) * 0.5, 0.35), vSandy);
         diffuseColor.rgb = mix(tintColor, natural, 0.88);
+        // Rock on high ridges; snow is altitude-limited so new countryside reads differently from city lawns.
+        float mountain034 = smoothstep(8.0, 19.0, vTerrainWorld.y);
+        vec3 cliff034 = texture2D(mountainMap034, vTerrainWorld.xz / 3.5).rgb;
+        diffuseColor.rgb = mix(diffuseColor.rgb, cliff034 * vec3(.90,.93,.92), mountain034 * .80);
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(.78,.82,.83), smoothstep(29.0,38.0,vTerrainWorld.y) * .78);
         diffuseColor.rgb *= mix(0.9, 1.06, groundFine) * mix(0.94, 1.04, surfaceHash(floor(vTerrainWorld.xz * 3.0)));`,
       )
       .replace(
@@ -392,7 +411,7 @@ export function makeGround(map) {
         roughnessFactor = clamp(texture2D(grassArm, tuv).g * 1.1, 0.55, 1.0);`,
       );
   };
-  material.customProgramCacheKey = () => 'district-terrain-v4' + (liteSurfaces ? ':lite' : '');
+  material.customProgramCacheKey = () => 'district-terrain-v034' + (liteSurfaces ? ':lite' : '');
   const mesh = new T.Mesh(geometry, material);
   mesh.receiveShadow = true;
   mesh.userData.standalone = true;

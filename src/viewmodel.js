@@ -455,7 +455,7 @@ export function poseViewWeapon(view, me, look, dt) {
     flash.getWorldPosition(P.light.position);
     P.light.intensity = 3 * (view.fpFlashT / 0.05);
   } else P.light.intensity = 0;
-  view.fpGlider.visible = !!me.gliding;
+  view.fpGlider.visible = !!me.gliding && !me.wingsOpen;
   // Raised into view while you aim, lowered a little while you run.
   view.fpShield.visible = me.gear?.id === 'shield' && me.gear.hp > 0 && !me.gliding;
   if (view.fpShield.visible) {

@@ -1,3 +1,4 @@
+import { cleanReceipts } from './portal-rewards.js';
 // Wardrobe, wallet and battle pass.
 // Everything here is cosmetic: colours, patterns, charms, accessories, effects and emotes never change how
 // much damage anyone does. Items are bought with coins earned in matches, or unlocked by battle-pass tiers.
@@ -157,6 +158,7 @@ export function readProfile(raw) {
     for (const k of KINDS) if (!p.owned.includes(p.equipped[k])) p.equipped[k] = DEFAULTS[k];
     for (const k of ['matches', 'wins', 'kills', 'passXp', 'level', 'xp'])
       p[k] = Number.isSafeInteger(v[k]) && v[k] >= 0 ? v[k] : p[k];
+    p.portalRewards = cleanReceipts(v.portalRewards);
     p.passTier = passTier(p.passXp);
     if (v.skills && typeof v.skills === 'object') p.skills = { ...v.skills };
     return p;

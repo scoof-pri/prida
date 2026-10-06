@@ -1,0 +1,40 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PRIDA / Capture desk</title><style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0f2024;color:#ede9db}*{box-sizing:border-box}body{margin:0}main{max-width:960px;margin:auto;padding:34px 22px}h1{font-size:clamp(30px,6vw,60px);margin:16px 0;letter-spacing:-.04em}.kicker{font-size:12px;letter-spacing:.2em;color:#a9ccc2}p{line-height:1.6;color:#bdcfc9;max-width:75ch}section{border:1px solid #425d5c;border-radius:12px;background:#193035;padding:22px;margin:22px 0}label{display:block;margin:16px 0 6px}input,select,button,a.action{font:inherit;padding:12px;border:1px solid #647670;border-radius:6px}select{width:100%;background:#0f2024;color:#fff}input[type=number]{width:100px;background:#0f2024;color:#fff}button,a.action{background:#dcca93;color:#142326;font-weight:700;cursor:pointer;display:inline-block;text-decoration:none;margin:6px 8px 6px 0}button:disabled{opacity:.5;cursor:default}.secondary{background:transparent;color:#eae8d8}small{line-height:1.6;color:#9cb1ac}#state{font-variant-numeric:tabular-nums;font-size:19px;color:#dfc995}video{display:block;width:100%;max-height:480px;background:#071013;margin-top:18px}[hidden]{display:none!important}.check{display:flex;gap:10px;align-items:center}footer{font-size:12px;color:#8aa49e;padding:20px 0}
+</style></head><body><main><div class="kicker">PRIDA / CREATOR TOOLS / LOCAL RECORDING</div><h1>CAPTURE THE GAME.<br>NOT A MOCK-UP.</h1><p>This tool records only the tab or window you select in your browser's sharing prompt. Nothing is uploaded. Open the actual PRIDA game in another tab, verify its version, and select that game tab — not this recorder.</p>
+<a class="action secondary" href="https://prida.onrender.com" target="_blank" rel="noopener">OPEN PRIDA</a>
+<section><label for="shot">Shot to record</label><select id="shot"><option value="01-city">01 / City reveal — 8 seconds</option><option value="02-combat">02 / Bot encounter and looting</option><option value="03-driving">03 / Street driving</option><option value="04-tank">04 / Tank aiming and cannon</option><option value="05-flight">05 / Flight and rockets</option><option value="06-destruction">06 / Building destruction</option><option value="07-interiors">07 / Interiors and lift</option><option value="08-finale">08 / Final combat beat</option></select>
+<label for="duration">Capture duration (5–30 seconds)</label><input id="duration" type="number" min="5" max="30" value="12">
+<label class="check"><input id="audio" type="checkbox" checked> Request game-tab audio (the browser may require “Share tab audio”)</label><p><button id="record">SELECT TAB & RECORD</button><button id="stop" class="secondary" disabled>STOP</button></p><p id="state" role="status">Ready. Recording starts after a three-second countdown.</p><a id="download" class="action" hidden>DOWNLOAD CLIP</a><video id="preview" controls muted playsinline hidden></video><button id="still" class="secondary" hidden>SAVE CURRENT FRAME</button></section>
+<small>Use a clean 1920×1080 game viewport and 30 or 60 fps. Disable notifications and keep browser chrome outside the capture. Record at normal game speed. Bots are suitable for staging; do not represent a bot session as a human multiplayer match. These are source clips, not automatic proof of performance or platform approval.</small><footer>Creator-only page. Excluded from CrazyGames game archives. Requires browser screen-capture permission; no webcam, microphone or server upload is requested.</footer></main>
+<script>
+(()=>{
+ const $=id=>document.getElementById(id);let recorder=null,stream=null,timer=null,url=null,parts=[],started=0;
+ const state=t=>$('state').textContent=t;
+ const stop=()=>{if(recorder&&recorder.state!=='inactive')recorder.stop();else stream?.getTracks().forEach(t=>t.stop());};
+ $('stop').onclick=stop;
+ $('still').onclick=()=>{const v=$('preview');if(!v.videoWidth)return;const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);c.toBlob(blob=>{if(!blob)return;const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='cover.png';a.click();setTimeout(()=>URL.revokeObjectURL(u),10000);},'image/png');};
+ $('record').onclick=async()=>{
+  if(!navigator.mediaDevices?.getDisplayMedia||!window.MediaRecorder){state('Screen recording is unavailable. Open this page over HTTPS or localhost in a supported browser.');return;}
+  $('record').disabled=true;$('download').hidden=true;parts=[];
+  const name=$('shot').value,duration=Math.min(30,Math.max(5,Number($('duration').value)||12));
+  try{
+   stream=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:30,max:60},width:{ideal:1920},height:{ideal:1080}},audio:$('audio').checked});
+   const mime=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
+   recorder=new MediaRecorder(stream,{...(mime?{mimeType:mime}:{}),videoBitsPerSecond:14000000,audioBitsPerSecond:192000});
+   recorder.ondataavailable=e=>{if(e.data.size)parts.push(e.data);};
+   recorder.onstop=()=>{
+    clearInterval(timer);stream?.getTracks().forEach(t=>t.stop());$('stop').disabled=true;$('record').disabled=false;
+    if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(new Blob(parts,{type:recorder.mimeType||'video/webm'}));
+    $('download').href=url;$('download').download=name+(recorder.mimeType.includes('mp4')?'.mp4':'.webm');$('download').hidden=false;$('preview').src=url;$('preview').hidden=false;$('still').hidden=false;state('Clip ready. Download it before recording the next shot.');
+   };
+   recorder.onerror=()=>{state('Recording error. Stop and try a different browser or codec.');stop();};
+   stream.getVideoTracks()[0].addEventListener('ended',stop,{once:true});
+   for(let n=3;n>0;n--){state('Recording in '+n+'… Switch to your PRIDA tab.');await new Promise(r=>setTimeout(r,1000));}
+   if(stream.getVideoTracks()[0].readyState==='ended')throw Error('Sharing stopped before recording.');
+   recorder.start(1000);started=performance.now();$('stop').disabled=false;
+   timer=setInterval(()=>{const t=(performance.now()-started)/1000;state('Recording '+t.toFixed(1)+' / '+duration+' s');if(t>=duration)stop();},100);
+  }catch(e){clearInterval(timer);stream?.getTracks().forEach(t=>t.stop());$('record').disabled=false;$('stop').disabled=true;state(e.name==='NotAllowedError'?'Recording permission was not granted.':e.message||'Unable to start recording.');}
+ };
+ window.addEventListener('beforeunload',()=>{clearInterval(timer);stream?.getTracks().forEach(t=>t.stop());if(url)URL.revokeObjectURL(url);});
+})();
+</script></body></html>

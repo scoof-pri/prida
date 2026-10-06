@@ -1,0 +1,295 @@
+{
+  "format": 1,
+  "pipeline": "Mixamo FBX -> anatomical bind-direction retarget -> glTF 2.0",
+  "fps": 30,
+  "rootMotion": "horizontal removed; vertical preserved",
+  "clips": [
+    {
+      "name": "Rifle_Aiming_Idle",
+      "source": "Rifle Aiming Idle (1).fbx",
+      "archive": null,
+      "duration": 3.0999999046325684,
+      "sourceSha256": "adcef44edcc482f34d1cd5dc579ceb1bb23e531dd030bf8699378ee0929e3ba5",
+      "sourceBytes": 115520464,
+      "sourceMotionSha256": "c13ee5883b628d14f861aa857e06be7d36ba04f21fe152b2cf165d560b5affce"
+    },
+    {
+      "name": "Firing_Rifle",
+      "source": "Firing Rifle (1).fbx",
+      "archive": null,
+      "duration": 1.1666666269302368,
+      "sourceSha256": "793135a3fc2dcb31264f9b55441c75bb15751ff03e14827773354526c886c83b",
+      "sourceBytes": 115251968,
+      "sourceMotionSha256": "4ff8ed2550ce7b6b8afb382142b0617caa906dca9d6d890f547c36f4894d56b2"
+    },
+    {
+      "name": "Reload",
+      "source": "Reloading (1).fbx",
+      "archive": null,
+      "duration": 3.6500000953674316,
+      "sourceSha256": "0af070bf457b8fb7ca3fd23c583bb158dce13bc6697560cc162b85d1fd577dc2",
+      "sourceBytes": 115553888,
+      "sourceMotionSha256": "2dba231bbec4e46ffa22afd4025ec5cfa8859b17359c50dfe8cb69fe077c6ff1"
+    },
+    {
+      "name": "Strafing",
+      "source": "Strafing (1).fbx",
+      "archive": null,
+      "duration": 1.25,
+      "sourceSha256": "06e60dd7f1b1590b89eb84a828e86e17a4caf9eb829e38fb2ea5c97ff34f0e8e",
+      "sourceBytes": 115202464,
+      "sourceMotionSha256": "0e0995a2e9e051ba5dd40f65a0d35d00ce57352508ab0aa5036f588755367108"
+    },
+    {
+      "name": "Walk_Backward",
+      "source": "Stepping Backward (1).fbx",
+      "archive": null,
+      "duration": 1.8333333730697632,
+      "sourceSha256": "21c494612a5b7b85a065fa2550afee8f5d21ede959a5f562f4c764dbce2b8941",
+      "sourceBytes": 115296960,
+      "sourceMotionSha256": "2a498ad4ab8123624a2ce5ff28ec729d94eb01455dabff0d52ddb1e04b897bda"
+    },
+    {
+      "name": "Death",
+      "source": "Dying (1).fbx",
+      "archive": null,
+      "duration": 4.383333206176758,
+      "sourceSha256": "cad9584bb88407861285571f062f3a123a695f4152cddeaf1b521b7c02c9be6f",
+      "sourceBytes": 115509904,
+      "sourceMotionSha256": "d37571b79ac729d25fb9c7d110e2405dca93b5dfbd002c1c9c066387643316a3"
+    },
+    {
+      "name": "DropKick",
+      "source": "Drop Kick (1).fbx",
+      "archive": null,
+      "duration": 2.9000000953674316,
+      "sourceSha256": "e994c68d922d2f39828e11e582b00d216d6801a72c16859df3c5340698077806",
+      "sourceBytes": 115513408,
+      "sourceMotionSha256": "ac9005274ae7d37ead56e202cef3ed936d9afe673ea97f4ca4aab280b1bc5d34"
+    },
+    {
+      "name": "Dagger_Stab",
+      "source": "Double Dagger Stab (1).fbx",
+      "archive": null,
+      "duration": 3.066666603088379,
+      "sourceSha256": "3faaa5255ad6084c8c6dc4a389113e246f7ff0b93d3f406453da83b40b34f1a2",
+      "sourceBytes": 115387504,
+      "sourceMotionSha256": "3cbc66e4a3fbda81c8b44d979c8dc0cf1c9343d9657b005767a6c9903ce2c9a0"
+    },
+    {
+      "name": "Adventure_idle",
+      "source": "pack/idle.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 3.933333396911621,
+      "sourceSha256": "6d23ef2ecb99902b51521416ee844a9e7856f5c3c4c74b155f2bdc2eb76f8930",
+      "sourceBytes": 615937,
+      "sourceMotionSha256": "6d23ef2ecb99902b51521416ee844a9e7856f5c3c4c74b155f2bdc2eb76f8930"
+    },
+    {
+      "name": "Adventure_falling_idle",
+      "source": "pack/falling idle.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 0.699999988079071,
+      "sourceSha256": "ad64a46fcc4566eefa606330407aaaa2a756f8ac9d7c9b7600941b66ced5fa85",
+      "sourceBytes": 348561,
+      "sourceMotionSha256": "ad64a46fcc4566eefa606330407aaaa2a756f8ac9d7c9b7600941b66ced5fa85"
+    },
+    {
+      "name": "Adventure_idle_2",
+      "source": "pack/idle (2).fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 9.933333396911621,
+      "sourceSha256": "4c86b7f8e85d33745db6796bb4708985eeb948ef70f803cb525187f27f63b579",
+      "sourceBytes": 844881,
+      "sourceMotionSha256": "4c86b7f8e85d33745db6796bb4708985eeb948ef70f803cb525187f27f63b579"
+    },
+    {
+      "name": "Adventure_idle_3",
+      "source": "pack/idle (3).fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 3.2666666507720947,
+      "sourceSha256": "847cbe63cd9c90d4062dea1898521945365135d716480d15adec38ce9fc79d2b",
+      "sourceBytes": 555313,
+      "sourceMotionSha256": "847cbe63cd9c90d4062dea1898521945365135d716480d15adec38ce9fc79d2b"
+    },
+    {
+      "name": "Adventure_running",
+      "source": "pack/running.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 0.699999988079071,
+      "sourceSha256": "1d68b6e97b0db90457d71435044486d451cf3175cf481e0802883d9c5a91a2f0",
+      "sourceBytes": 337905,
+      "sourceMotionSha256": "1d68b6e97b0db90457d71435044486d451cf3175cf481e0802883d9c5a91a2f0"
+    },
+    {
+      "name": "Adventure_stand_to_cover",
+      "source": "pack/stand to cover.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.0666667222976685,
+      "sourceSha256": "9f78301ebed56b633804066806277bb0469a095d8b269301f168b99e05f051b8",
+      "sourceBytes": 376001,
+      "sourceMotionSha256": "9f78301ebed56b633804066806277bb0469a095d8b269301f168b99e05f051b8"
+    },
+    {
+      "name": "Adventure_walking",
+      "source": "pack/walking.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.0333333015441895,
+      "sourceSha256": "41e432bafa57b71183663034d7d4a5a0ebaeed7a390a948a73b6a8229fb439da",
+      "sourceBytes": 366961,
+      "sourceMotionSha256": "41e432bafa57b71183663034d7d4a5a0ebaeed7a390a948a73b6a8229fb439da"
+    },
+    {
+      "name": "Adventure_stand_to_cover_2",
+      "source": "pack/stand to cover (2).fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.2333333492279053,
+      "sourceSha256": "33f69128428dcafb855fa8e7e4482e2a8e3310cc090699901d8d6cbd0f2e4084",
+      "sourceBytes": 383489,
+      "sourceMotionSha256": "33f69128428dcafb855fa8e7e4482e2a8e3310cc090699901d8d6cbd0f2e4084"
+    },
+    {
+      "name": "Adventure_run_to_stop",
+      "source": "pack/run to stop.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 0.8999999761581421,
+      "sourceSha256": "b619578ffe962b17f10e597f2ccd48cd9f48d83a4add64aa42b28b0827aab67f",
+      "sourceBytes": 345873,
+      "sourceMotionSha256": "b619578ffe962b17f10e597f2ccd48cd9f48d83a4add64aa42b28b0827aab67f"
+    },
+    {
+      "name": "Adventure_left_turn",
+      "source": "pack/left turn.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.0333333015441895,
+      "sourceSha256": "7b0b918e455302577a08ea877c0da07ee88f5200ac0257582b0651f7615f5a86",
+      "sourceBytes": 358065,
+      "sourceMotionSha256": "7b0b918e455302577a08ea877c0da07ee88f5200ac0257582b0651f7615f5a86"
+    },
+    {
+      "name": "Adventure_right_turn",
+      "source": "pack/right turn.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1,
+      "sourceSha256": "fde507c0a09172704fbea3702b69dce22059c2125c86008306efee3be91881d2",
+      "sourceBytes": 359553,
+      "sourceMotionSha256": "fde507c0a09172704fbea3702b69dce22059c2125c86008306efee3be91881d2"
+    },
+    {
+      "name": "Adventure_jumping_up",
+      "source": "pack/jumping up.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 0.23333333432674408,
+      "sourceSha256": "3cb68de451463951549acc652807bd14baadf23180b0567bd85507a4de184ce5",
+      "sourceBytes": 337729,
+      "sourceMotionSha256": "3cb68de451463951549acc652807bd14baadf23180b0567bd85507a4de184ce5"
+    },
+    {
+      "name": "Adventure_falling_to_roll",
+      "source": "pack/falling to roll.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.4666666984558105,
+      "sourceSha256": "ebe82c22cb15ca50f450d080ac0297b5859da01944bcd84d099e5622178108f7",
+      "sourceBytes": 435105,
+      "sourceMotionSha256": "ebe82c22cb15ca50f450d080ac0297b5859da01944bcd84d099e5622178108f7"
+    },
+    {
+      "name": "Adventure_hard_landing",
+      "source": "pack/hard landing.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 2,
+      "sourceSha256": "e232817c5bcda1cbabe3c6bfe5dddc6689eabaa3b9522282f3824dfcd4ec5db1",
+      "sourceBytes": 455633,
+      "sourceMotionSha256": "e232817c5bcda1cbabe3c6bfe5dddc6689eabaa3b9522282f3824dfcd4ec5db1"
+    },
+    {
+      "name": "Adventure_cover_to_stand",
+      "source": "pack/cover to stand.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.5,
+      "sourceSha256": "a62925097131f40d92c034402f2165d431c5b24110cb9beb745d06a00a843453",
+      "sourceBytes": 407425,
+      "sourceMotionSha256": "a62925097131f40d92c034402f2165d431c5b24110cb9beb745d06a00a843453"
+    },
+    {
+      "name": "Adventure_idle_4",
+      "source": "pack/idle (4).fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 2.566666603088379,
+      "sourceSha256": "89ea4d4a2778d175ea98a3f7d80521b190dfcd0b6f1b2caf1ac406b3ae779e80",
+      "sourceBytes": 449153,
+      "sourceMotionSha256": "89ea4d4a2778d175ea98a3f7d80521b190dfcd0b6f1b2caf1ac406b3ae779e80"
+    },
+    {
+      "name": "Adventure_crouched_sneaking_left",
+      "source": "pack/crouched sneaking left.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.2666666507720947,
+      "sourceSha256": "54e7b47a2e1905dcf44a11a2019870614787a625e8b3e92efb24dabd999ba147",
+      "sourceBytes": 388129,
+      "sourceMotionSha256": "54e7b47a2e1905dcf44a11a2019870614787a625e8b3e92efb24dabd999ba147"
+    },
+    {
+      "name": "Adventure_crouched_sneaking_right",
+      "source": "pack/crouched sneaking right.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.0333333015441895,
+      "sourceSha256": "e65b7aa1e8453a9d5118610cf18e3ac8141ccba780619ef60db377699be29b96",
+      "sourceBytes": 374129,
+      "sourceMotionSha256": "e65b7aa1e8453a9d5118610cf18e3ac8141ccba780619ef60db377699be29b96"
+    },
+    {
+      "name": "Adventure_left_cover_sneak",
+      "source": "pack/left cover sneak.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.1333333253860474,
+      "sourceSha256": "2ba65a481b72d2040d2e4fd026f1fd0785ff2c296f8a91cbeeb7c1674c498285",
+      "sourceBytes": 369297,
+      "sourceMotionSha256": "2ba65a481b72d2040d2e4fd026f1fd0785ff2c296f8a91cbeeb7c1674c498285"
+    },
+    {
+      "name": "Adventure_right_cover_sneak",
+      "source": "pack/right cover sneak.fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.100000023841858,
+      "sourceSha256": "046b1666a9b60afd6bf2bee15f907dba3ea2313950f9adc1fdf3dc2daaad4bfa",
+      "sourceBytes": 372113,
+      "sourceMotionSha256": "046b1666a9b60afd6bf2bee15f907dba3ea2313950f9adc1fdf3dc2daaad4bfa"
+    },
+    {
+      "name": "Adventure_idle_5",
+      "source": "pack/idle (5).fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 2.2666666507720947,
+      "sourceSha256": "409ed0e98d0f4e952dafe9b5ba70ec01e2eaf98a595ca3770f56c63f74e8102e",
+      "sourceBytes": 440657,
+      "sourceMotionSha256": "409ed0e98d0f4e952dafe9b5ba70ec01e2eaf98a595ca3770f56c63f74e8102e"
+    },
+    {
+      "name": "Adventure_cover_to_stand_2",
+      "source": "pack/cover to stand (2).fbx",
+      "archive": "Action Adventure Pack (1).zip",
+      "duration": 1.1333333253860474,
+      "sourceSha256": "64a9c11ef5b11f7697ea48fa8c01d6850232180af5f9b8c405cdf3a3ad5ed5b8",
+      "sourceBytes": 397169,
+      "sourceMotionSha256": "64a9c11ef5b11f7697ea48fa8c01d6850232180af5f9b8c405cdf3a3ad5ed5b8"
+    }
+  ],
+  "models": [
+    {
+      "file": "tactical-player.glb",
+      "kind": "soldier",
+      "bytes": 1372740,
+      "sha256": "b042df11b33ab0a6906ba483948b2a8166cb5c5282dc63372334df8f196859cb",
+      "animationCount": 30
+    },
+    {
+      "file": "aegis-player.glb",
+      "kind": "suit",
+      "bytes": 1247020,
+      "sha256": "ebeda44a31536ef95483a76d3116e1ef38ec88b56a2e5eeb56ad4490f8e961fb",
+      "animationCount": 30
+    }
+  ],
+  "referenceSkeleton": "33e3b16c9cea339d4b0138eb86d3789025f32d3a001ec9d8008338331fa0ebf9"
+}

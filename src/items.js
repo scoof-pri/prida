@@ -2,7 +2,7 @@
 import { WEAPONS, RARITIES, GEAR, MELEE, ARMOR_TIERS, FISTS } from './catalog.js';
 
 export { WEAPONS, RARITIES, GEAR, MELEE, ARMOR_TIERS, FISTS };
-export const SLOT_COUNT = 5; // 0 = melee, 1–4 = weapons
+export const SLOT_COUNT = 5; // 0 = melee, 1–4 = weapons and consumable items
 export const MAX_RARITY = RARITIES.length - 1;
 const clampInt = (v, a, b, d) => (Number.isInteger(v) && v >= a && v <= b ? v : d);
 
@@ -62,8 +62,13 @@ export function loadoutSlots(l) {
   return [makeItem(l.melee), makeItem(l.primary), makeItem(l.secondary), null, null];
 }
 export function makeGear(id) {
-  const g = GEAR.find((g) => g.id === id);
-  return g ? { id: g.id, fuel: g.fuel ?? 0, hp: g.hp ?? 0 } : null;
+  const saved = id && typeof id === 'object' ? id : null;
+  const g = GEAR.find((g) => g.id === (saved ? saved.id : id));
+  if (!g) return null;
+  const bounded = (v, max) => Number.isFinite(v) ? Math.max(0, Math.min(max, v)) : max;
+  const gear = { id: g.id, fuel: bounded(saved?.fuel, g.fuel ?? 0), hp: bounded(saved?.hp, g.hp ?? 0) };
+  if (g.id === 'aegis' && Number.isInteger(saved?.rocketAmmo)) gear.rocketAmmo = Math.max(0, Math.min(6, saved.rocketAmmo));
+  return gear;
 }
 // How much the shield and a heavy vest slow a player down.
 export function carryWeight(p) {
@@ -113,7 +118,7 @@ export function rollRarity(rand, tier = 'chest') {
 }
 // The weapons a chest can hold as its main find (no bare hands, no items), and the items it adds on top.
 export const LOOT_WEAPONS = WEAPONS.flatMap((w, i) => (!w.noLoot && !w.consumable && !w.extra ? [i] : []));
-export const EXTRA_ITEMS = WEAPONS.flatMap((w, i) => (w.consumable || w.extra ? [i] : []));
+export const EXTRA_ITEMS = WEAPONS.flatMap((w, i) => (!w.noLoot && (w.consumable || w.extra) ? [i] : []));
 export function rollWeapon(rand) {
   return LOOT_WEAPONS[weighted(
     rand,

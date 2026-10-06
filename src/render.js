@@ -1,3 +1,23 @@
+import { CUSTOM_POSED_BONES, poseCustomAvatar, disposeAvatarSkeleton } from './custom-characters.js';
+import { applyBusCamera } from './bus-camera.js';
+import { syncEscalators } from './escalator-system.js';
+import { LandscapeWaterViews } from './landscape-view.js';
+import { syncLifts } from './lift-system.js';
+import { beginStreamFrame } from './stream-budget.js';
+import { StreamScenery } from './stream-scenery.js';
+import { StreamWorld } from './stream-world.js';
+import { DetailDebris } from './detail-debris.js';
+import { syncRamRubble } from './vehicle-ram.js';
+import { syncConstructions } from './construction.js';
+import { syncDrones } from './drone-system.js';
+import { selectCharacterAnimation, applyCharacterAnimationPlayback, importedMelee } from './character-animations.js';
+import { TechnologyViews } from './technology-view.js';
+import { attachAegis, suitHands } from './technology-models.js';
+import { VehicleViews } from './vehicle-view.js';
+import { SiteViews } from './expansion-view.js';
+import { syncVehicles } from './vehicle-system.js';
+import { syncDoors } from './door-system.js';
+import { cutRect } from './architecture-geometry.js';
 import { COSMETICS, appearance } from './cosmetics.js';
 import { CombatEffects } from './effects.js';
 import { groundChunks, makeSky, makeWater, detailMaterial, makeEnvironment, setSurfaceQuality, copySurface, WORLD } from './materials.js';
@@ -375,6 +395,9 @@ export class View {
   }
   setWorld(seed, size = 'district') {
     if (this.map?.seed === seed && this.map?.size === mapSize(size)) return;
+    this.sectorWorld?.dispose(); this.sectorWorld = null;
+    this.landscapeWater?.dispose(); this.landscapeWater = null;
+    this.detailDebris?.dispose(); this.detailDebris = null;
     if (this.terrain) {
       this.scene.remove(this.terrain);
       const shared = new Set();
@@ -406,7 +429,7 @@ export class View {
     this.terrain = new T.Group();
     this.scene.add(this.terrain);
     this.scenery?.dispose();
-    this.scenery = this.useAssets === false ? null : new Scenery(this.scene, this.map);
+    this.scenery = this.useAssets === false ? null : this.map.tiled ? new StreamScenery(this.scene, this.map) : new Scenery(this.scene, this.map);
     if (this.scenery) this.scenery.culler.lite = !!this.lite;
     this.world();
     this.batchStatic();
@@ -421,6 +444,13 @@ export class View {
     this.shake = 0;
   }
   world() {
+    if (this.map?.tiled) {
+      this.sectorWorld = new StreamWorld(this, this.map);
+      this.landscapeWater = new LandscapeWaterViews(this,this.map);
+      this.nature = { hide: id => this.scenery?.hideNature(id) };
+      this.detailDebris = new DetailDebris(this.scene, this.map);
+      return;
+    }
     const map = this.map || createWorld(DEFAULT_SEED),
       parent = this.terrain || this.scene,
       L = map.limit;
@@ -432,6 +462,8 @@ export class View {
       dirtPath = detailMaterial('dirt', 0xaa9576, { box: true, strength: 0.7 }),
       // Road paint keeps the asphalt's grain and cracks.
       marking = detailMaterial('asphalt', 0xf2eee2, { box: true, albedo: 0, strength: 0.9, key: 'paint', roughness: 0.7 });
+    // Only intentional road paint uses depth bias. Solid surfaces are separated geometrically.
+    marking.polygonOffset = true; marking.polygonOffsetFactor = -1; marking.polygonOffsetUnits = -1;
     for (const r of map.roads) {
       this.box(r.x, 0.03, r.z, r.w, 0.06, r.d, asphalt);
       // Dashed centre line along straight segments.
@@ -455,11 +487,13 @@ export class View {
     const sidewalk = detailMaterial('sidewalk', 0xb0b5a1, { box: true, strength: 0.6 }),
       curb = detailMaterial('concrete', 0xc9c5ba, { box: true, key: 'curb' });
     for (const b of map.buildings) {
-      this.box(b.x, 0.012, b.z, b.w + 2, 0.025, b.d + 2, sidewalk);
+      // The pavement is a ring, not a second textured floor just below the whole interior.
+      for (const r of cutRect({x:b.x,z:b.z,w:b.w+2,d:b.d+2}, [{x:b.x,z:b.z,w:b.w-0.4,d:b.d-0.4}]))
+        this.box(r.x, 0.012, r.z, r.w, 0.025, r.d, sidewalk);
       // Kerb stones along the edge of the pavement.
       for (const s of [-1, 1]) {
         this.box(b.x, 0.04, b.z + s * (b.d / 2 + 1), b.w + 2.2, 0.08, 0.2, curb);
-        this.box(b.x + s * (b.w / 2 + 1), 0.04, b.z, 0.2, 0.08, b.d + 2, curb);
+        this.box(b.x + s * (b.w / 2 + 1), 0.04, b.z, 0.2, 0.08, b.d + 1.8, curb);
       }
       this.box(b.x, 0.025, b.z, b.w - 0.4, 0.04, b.d - 0.4, floors[b.category] || floors.home);
       const sign = this.text(b.sign.toUpperCase(), Math.min(b.w - 1, 5), 0.52);
@@ -515,12 +549,12 @@ export class View {
     this.scene.add(root);
     const look = appearance(p.cosmetics),
       spec = COSMETICS.find((c) => c.id === look.operator),
-      a = character(spec?.model || 0),
+      a = character(spec?.model || 0, p.gear?.id === 'aegis'),
       body = a.model;
     // Yaw first, then pitch about the character's own shoulders: leans and dives tip the body the way it faces.
     body.rotation.order = 'YXZ';
     root.add(body);
-    applyUniformTint(body, look.tint, spec?.skin);
+    if(p.gear?.id!=='aegis') applyUniformTint(body, look.tint, spec?.skin);
     // The rig's short cannon is replaced by the machine gun model.
     const ak = body.getObjectByName('AK'),
       old = body.getObjectByName('ShortCannon');
@@ -556,6 +590,7 @@ export class View {
     const gear = {},
       k = 1 / body.scale.x;
     for (const g of GEAR) {
+      if (g.id === 'aegis') continue; // rendered as articulated armour on the rig, not a generic backpack
       const m = gearModel(g.id);
       m.visible = false;
       m.scale.setScalar(k);
@@ -615,16 +650,20 @@ export class View {
       head.add(markOwned(accessory));
     } else if (accessory) disposeOwned(markOwned(accessory));
     for (const g of guns) this.gunCharm(g, look.charm);
+    const aegis = attachAegis(body);
     const v = {
       root,
       body,
-      posedNames: TOON_POSED,
+      posedNames: a.customAvatar ? CUSTOM_POSED_BONES : TOON_POSED,
+      customAvatar: !!a.customAvatar,
+      suitSkin: p.gear?.id === 'aegis',
       mixer: a.mixer,
       actions,
       guns,
       mountAt,
       look,
       gear,
+      aegis,
       vests,
       hp,
       bar,
@@ -662,8 +701,12 @@ export class View {
   }
   // Mounts a weapon or item that the rig does not carry in a soldier's right hand (the first time it is held).
   mountGun(v, w) {
-    const at = v.mountAt,
-      name = characterGun(w);
+    const name = characterGun(w);
+    if(v.customAvatar && name){
+      const mesh=gun(WEAPONS.indexOf(w));mesh.name=name;mesh.userData.customMount041=true;mesh.visible=false;
+      v.body.add(mesh);v.guns.push(mesh);return mesh;
+    }
+    const at = v.mountAt;
     if (!at || !name) return null;
     const { ak, ref, real } = at,
       mount = new T.Group(),
@@ -771,6 +814,9 @@ export class View {
     this.fpGlider.scale.setScalar(0.75);
     this.fpGlider.visible = false;
     this.weaponScene.add(this.fpGlider);
+    this.fpAegisHands = suitHands();
+    this.fpAegisHands.visible = false;
+    this.weaponScene.add(this.fpAegisHands);
     makeViewProps(this);
     this.swing = 0;
     this.swingSide = 1;
@@ -820,7 +866,9 @@ export class View {
     this.charm = look.charm;
   }
   removePerson(v) {
+    if(v.customAvatar)disposeAvatarSkeleton(v.body);
     this.scene.remove(v.root);
+    v.aegis?.dispose?.();
     v.mixer.stopAllAction();
     v.mixer.uncacheRoot(v.body);
     disposeTint(v.root);
@@ -834,6 +882,9 @@ export class View {
     v.label.material.dispose();
   }
   event(e) {
+    this.detailDebris?.event(e);
+    this.vehicleViews?.event(e);
+    this.technologyViews?.event(e);
     if (e.type === 'shot') {
       // Brass and flash: your own flash in first person is drawn on the weapon in your hands; revolvers keep their
       // cases until the reload; shotguns throw red shells.
@@ -1219,6 +1270,19 @@ export class View {
     // A new match on the same map starts with fewer destroyed things than this view shows: rebuild the world.
     if (state.destruction && this.map?.applied && destructionCount(state.destruction) < this.appliedCount) this.map = null;
     this.setWorld(state.seed || DEFAULT_SEED, state.size);
+    syncDoors(this.map, state.doors);
+    syncLifts(this.map, state.lifts);
+    syncEscalators(this.map,state.escalators);
+    syncVehicles(this.map, state.vehicles);
+    syncConstructions(this.map, state.constructions);
+    syncDrones(this.map, state.drones);
+    beginStreamFrame(this.map);
+    if (!this.vehicleViews || this.vehicleViews.map !== this.map) {
+      this.vehicleViews?.dispose();this.siteViews?.dispose();this.technologyViews?.dispose();
+      this.vehicleViews = new VehicleViews(this, this.map);
+      this.siteViews = this.scenery ? new SiteViews(this, this.map) : null;
+      this.technologyViews = new TechnologyViews(this, this.map);
+    }
     if (state.destruction) this.appliedCount = destructionCount(state.destruction);
     if (this.lastRound !== state.round) {
       this.fx.reset(this.map);
@@ -1234,7 +1298,7 @@ export class View {
         : look.aim
           ? WEAPONS[me?.weapon]?.zoom || 55
           : 75 + (me?.sprinting ? 5 : 0) + (freeFall ? 12 : me?.gliding ? 6 : 0) + (me?.thrusting ? 3 : 0);
-    if (this.camera.fov !== fov && !(menu && state.lobby)) {
+    if (!me?.vehicle && this.camera.fov !== fov && !(menu && state.lobby)) {
       this.camera.fov = T.MathUtils.damp(this.camera.fov, fov, 14, dt);
       this.camera.updateProjectionMatrix();
     }
@@ -1252,7 +1316,16 @@ export class View {
       this.aimFix = null;
       this.camera.position.set(52, 115, 104);
       this.camera.lookAt(0, 0, 0);
-    } else {
+    } else if (me.inBus && state.bus?.active) {
+      applyBusCamera(this, state.bus, look, dt);
+    } else if (me.droneId && (state.drones || []).some(d => d.id === me.droneId)) {
+      this.aimFix = null; this.camNear = Infinity;
+      const d = state.drones.find(q => q.id === me.droneId), f = direction(d.angle, d.pitch || 0), back = 2.15, up = .62;
+      this.camera.position.set(d.x - f.x * back, Math.max(groundHeight(d.x, d.z, this.map) + .22, d.y + up - f.y * .35), d.z - f.z * back);
+      this.camera.lookAt(d.x + f.x * 5, d.y + f.y * 5, d.z + f.z * 5);
+      this.camera.rotation.z += -(d.roll || 0) * .28;
+      if (this.camera.fov !== 86) { this.camera.fov = T.MathUtils.damp(this.camera.fov, 86, 10, dt); this.camera.updateProjectionMatrix(); }
+    } else if (!me.vehicle) {
       const d = direction(look.angle, look.pitch),
         ground = groundHeight(me.x, me.z, this.map);
       // Landing dip and a falling death camera for the player being viewed.
@@ -1373,6 +1446,8 @@ export class View {
         this.removePerson(old);
         this.people.delete(p.id);
       }
+      const priorAvatar=this.people.get(p.id);
+      if(priorAvatar && priorAvatar.suitSkin !== (p.gear?.id==='aegis')){this.removePerson(priorAvatar);this.people.delete(p.id);}
       const v = this.people.get(p.id) || this.person(p, p.id === id),
         weight = v.initialized ? 1 - Math.exp(-dt * 19) : 1;
       v.initialized = true;
@@ -1446,13 +1521,14 @@ export class View {
       v.landT = Math.max(0, v.landT - dt);
       // Fallen characters sink away after a few seconds; respawning resets them.
       v.dead = p.hp <= 0 ? v.dead + dt : 0;
-      v.body.position.y = v.dead > 3 ? -Math.min(1.8, (v.dead - 3) * 0.6) : 0;
+      const sinkDelay = Math.max(3, (v.actions.Death?.getClip().duration || 0) + 0.5);
+      v.body.position.y = v.dead > sinkDelay ? -Math.min(1.8, (v.dead - sinkDelay) * 0.6) : 0;
       const walking = p.moving > 0.5 && p.moving < 4.2;
       // Emotes: the equipped one plays for a few seconds, with its own bob, spin or robot steps on top.
       const emote = p.emote > 0 && p.hp > 0 ? COSMETICS.find((c) => c.id === look.emote) : null;
       v.emoteClock = emote ? v.emoteClock + dt : 0;
       const dance = emote?.dance;
-      v.body.position.y = v.dead > 3 ? v.body.position.y : dance?.bob ? Math.abs(Math.sin(v.emoteClock * (dance.speed || 5))) * dance.bob : 0;
+      v.body.position.y = v.dead > sinkDelay ? v.body.position.y : dance?.bob ? Math.abs(Math.sin(v.emoteClock * (dance.speed || 5))) * dance.bob : 0;
       // Locomotion (0.27): the legs go the way the body moves and the chest turns back to the aim; backwards the
       // gait runs in reverse; standing, the feet stay planted until the chest has turned too far, then step round.
       const upright = p.hp > 0 && !seat && !emote && !airborne && !p.dropping && !p.gliding && !p.inBus && !(p.healing > 0);
@@ -1512,6 +1588,8 @@ export class View {
         shooting = firearm && v.recoil > 0;
       let clipName = TOON_CLIPS[anim] || anim;
       if (shooting && (clipName === 'Idle' || clipName === 'Walk' || clipName === 'Run_Gun')) clipName = clipName === 'Idle' ? 'Idle_Shoot' : clipName === 'Walk' ? 'Walk_Shoot' : 'Run_Shoot';
+      const motion = selectCharacterAnimation(v, p, { base: anim, stance, firearm, shooting, airborne, walking, emote, dt });
+      if (motion) clipName = motion.name;
       this.animate(v, clipName);
       // Legs keep pace with the ground: each gait's clip runs at the speed it was made for (backwards: reversed).
       const clip = v.actions[v.animation],
@@ -1540,6 +1618,7 @@ export class View {
           this.fx.event({ type: 'step', x: p.x, y: p.y || 0, z: p.z });
         }
       }
+      applyCharacterAnimationPlayback(v, motion);
       restorePose(v);
       v.mixer.update(dt);
       savePose(v);
@@ -1548,25 +1627,26 @@ export class View {
       const pitch = p.lowReady ? 0 : p.id === id && !menu ? aim.pitch : p.pitch || 0;
       if (upright && v.legYaw) this.twistTorso(v, -v.legYaw);
       if (p.hp > 0 && !p.inBus && !emote) this.bendTorso(v, pitch, upright ? v.yaw : v.body.rotation.y);
-      this.poseBody(v, p, dt, { fists: !!weapon?.fists && upright && v.animation !== 'Punch' && v.animation !== 'HitReact' && !p.lowReady, drink: !!p.using && !weapon?.deploy && weapon?.model !== 'bandage' ? 1 - p.using.t / (p.using.time || 1) : -1 });
+      this.poseBody(v, p, dt, { fists: !!weapon?.fists && upright && !importedMelee(v.animation) && v.animation !== 'HitReact' && !p.lowReady, drink: !!p.using && !weapon?.deploy && weapon?.model !== 'bandage' ? 1 - p.using.t / (p.using.time || 1) : -1 });
       // The weapon or item in the right hand (the rig carries them all; only the one held shows). Nothing is held
       // while healing, dancing, gliding or falling out of the bus.
-      const busy = !!emote || (p.healing > 0 && !airborne) || p.gliding || (p.dropping && !p.gliding) || p.inBus,
+      const busy = (p.gear?.id==='aegis' && !weapon?.drone) || !!emote || (p.healing > 0 && !airborne) || p.gliding || (p.dropping && !p.gliding) || p.inBus,
         shown = busy ? null : characterGun(weapon);
       if (shown && !v.guns.some((g) => g.name === shown)) this.mountGun(v, weapon);
       for (const g of v.guns) g.visible = g.name === shown;
       if (v.gear.jetpack) v.gear.jetpack.visible = p.gear?.id === 'jetpack' && p.hp > 0;
-      if (v.gear.glider) v.gear.glider.visible = !!p.gliding && p.hp > 0;
+      if(v.aegis?.items) for (const part of v.aegis.items) part.visible = p.gear?.id === 'aegis' && p.hp > 0;
+      if (v.gear.glider) v.gear.glider.visible = !!p.gliding && !p.wingsOpen && p.hp > 0;
       if (v.gear.shield) v.gear.shield.visible = p.gear?.id === 'shield' && p.gear.hp > 0 && p.hp > 0;
-      if (v.vests) for (const [tier, mesh] of Object.entries(v.vests)) mesh.visible = p.armorTier === tier && p.hp > 0;
-      if (p.thrusting && p.hp > 0 && dt > 0) this.fx.jet(p, dt);
+      if (v.vests) for (const [tier, mesh] of Object.entries(v.vests)) mesh.visible = !v.customAvatar && p.armorTier === tier && p.hp > 0;
+      if (p.thrusting && p.hp > 0 && dt > 0 && p.gear?.id!=='aegis') this.fx.jet(p, dt);
       // Your own name and health bar would float right under the crosshair in third person: others' only.
       // On the lobby stage: no health bars; group members keep their names, you have the name plate.
       v.hp.visible = p.hp > 0 && (menu || p.id !== id) && !state.lobby && !p.inBus;
       v.label.visible = p.hp > 0 && (menu || p.id !== id) && !(state.lobby && p.id === id) && !p.inBus;
       // Pulled in against a wall, the camera would sit inside your own head: then the body is not drawn.
       if (p.id === id && !menu && this.camNear < 0.75) v.root.visible = false;
-      if (v.dead > 6) v.root.visible = false;
+      if (v.dead > sinkDelay + 3) v.root.visible = false;
       v.bar.scale.x = (0.7 * p.hp) / 100;
       v.bar.position.x = -(0.7 - v.bar.scale.x) / 2;
       v.hp.quaternion.copy(this.camera.quaternion);
@@ -1578,13 +1658,19 @@ export class View {
         this.people.delete(pid);
       }
     this.syncWorld(state, dt);
+    syncRamRubble(this.map, state.ramCleared, this.scenery);
     // Launch pads, cover walls and campfires (0.27).
     this.deploys ??= new DeployViews(this.scene, this.fx);
     this.deploys.setMap(this.map);
     this.deploys.update(menu ? [] : state.deployables, dt);
+    this.vehicleViews.update(state, id, dt, menu, aim);
+    this.technologyViews?.update(state, id, dt, menu, look.build || null);
+    this.sectorWorld?.update(this.camera, this.viewDistance || 250);
+    this.landscapeWater?.update(this.camera,this.viewDistance || 250);
     this.scenery?.cull(this.camera, this.viewDistance || 250);
     this.grass?.update(this.camera, state.players);
     this.scenery?.update(dt, this.fx);
+    this.siteViews?.update(state);
     for (const c of this.chimneys) {
       if (c.b.collapsed) continue;
       c.clock += dt;
@@ -1599,10 +1685,11 @@ export class View {
       dt,
     );
     this.fx.update(dt);
+    this.detailDebris?.update(dt);
     this.sky.position.copy(this.camera.position);
     // The sun's shadow box (±145 m) follows the camera, snapped to 8 m so shadows do not shimmer; on the district
     // it simply stays centred.
-    if (this.map.size === 'city' || (this.viewDistance || 250) < 200) {
+    if (this.map.expansion || this.map.size === 'city' || (this.viewDistance || 250) < 200) {
       const sx = Math.round(this.camera.position.x / 8) * 8,
         sz = Math.round(this.camera.position.z / 8) * 8;
       this.sun.target.position.set(sx, 0, sz);
@@ -1613,8 +1700,13 @@ export class View {
     }
     for (const water of this.waters) water.material.uniforms.time.value += dt;
     this.renderer.autoClear = true;
-    const drawWeapon = !menu && !this.thirdPerson && me && me.hp > 0 && state.winner === null && !(me.flashback > 0) && !me.inBus;
-    if (drawWeapon) poseViewWeapon(this, me, aim, dt);
+    const drawWeapon = !menu && !this.thirdPerson && me && !me.vehicle && !me.droneId && me.hp > 0 && state.winner === null && !(me.flashback > 0) && !me.inBus;
+    if (drawWeapon) {
+      poseViewWeapon(this, me, aim, dt);
+      const suit = me.gear?.id === 'aegis' && !WEAPONS[me.weapon]?.drone;
+      this.fp.visible = !suit;
+      if (this.fpAegisHands) this.fpAegisHands.visible = suit;
+    } else { this.fp.visible = false; if (this.fpAegisHands) this.fpAegisHands.visible = false; }
     this.bossViews ||= new BossViews(this);
     this.bossViews.update(state, dt, this.camera, id);
     this.camera.updateMatrixWorld();
@@ -1654,9 +1746,10 @@ export class View {
   // Poses on top of the clip: the lean into a sprint, the jetpack and free fall, arms spread in free fall and up on
   // the glider bar, the gun tipped down for a reload; bare hands up in a guard, a bottle raised to the mouth.
   poseBody(v, p, dt, extra = {}) {
+    if(v.customAvatar)return poseCustomAvatar(v,p,dt,extra);
     const alive = p.hp > 0 && !p.inBus,
-      freeFall = alive && p.dropping && !p.gliding,
-      gliding = alive && p.gliding,
+      freeFall = alive && ((p.dropping && !p.gliding)||p.wingsOpen),
+      gliding = alive && p.gliding && !p.wingsOpen,
       target = !alive ? 0 : freeFall ? 1.25 : gliding ? 0.38 : p.thrusting ? 0.32 : p.sprinting ? 0.14 : 0;
     v.lean = T.MathUtils.damp(v.lean || 0, target, 5, dt);
     v.spread = T.MathUtils.damp(v.spread || 0, freeFall ? 1 : 0, 5, dt);

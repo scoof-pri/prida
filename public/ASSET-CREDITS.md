@@ -1,6 +1,6 @@
 # PRIDA — Asset credits
 
-All assets below were downloaded from their authors' public distribution links on 2026-09-17. Their source pages identify the packs as CC0. Copies of Kenney's supplied license notices are in `licenses/`. No assets are fetched from these sites during gameplay.
+The public asset packs listed below were downloaded from their authors' distribution links on 2026-09-17. Their source pages identify those packs as CC0. User-supplied character assets and motion are recorded separately at the end. Copies of Kenney's supplied license notices are in `licenses/`. No assets are fetched from these sites during gameplay.
 
 ## Quaternius — Universal Base Characters and Universal Animation Library 1 & 2 (CC0), 0.22–0.27
 
@@ -85,3 +85,7 @@ Since 0.20.2 the bosses are game-authored creatures (`src/boss-models.js`) with 
 fists, shieldcell, shieldkeg, bandage, overcharge, serum, rush, stim, impulse, sticky, launchpad, coverwall and campfire
 (`public/models/*.glb` and their icons) are built by the game's own code from three.js primitives
 (`scripts/procedural-models.js`, exported by `scripts/build-weapon-assets.mjs`). No third-party assets.
+
+## User-supplied character motion (0.42)
+
+The project owner supplied eight Mixamo FBX animation exports (Strafing, Stepping Backward, Dying, Firing Rifle, Rifle Aiming Idle, Drop Kick, Double Dagger Stab and Reloading) and Action Adventure Pack (22 motion FBX files plus the Ch15 reference character). Thirty source motions are retargeted to the existing tactical and AEGIS user-supplied STL rigs. The supplied FBX mesh and texture payloads are not shipped. These uploads are recorded separately from the CC0 public packs above; no CC0 status is assigned to them by this update. Original file hashes, clip durations and exported asset hashes are in models/animation-manifest.json. Conversion and gameplay mapping are described in docs/ANIMATIONS-0.42.md in the repository.

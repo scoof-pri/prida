@@ -1,3 +1,5 @@
+import { furnishLandmark } from './landmark-world.js';
+import { furnishPlannedFloor } from './interior-furniture.js';
 // Interiors: every building type has a purpose, and each storey is furnished for it (homes have kitchens,
 // living rooms, bedrooms and bathrooms; cafes tables and a bar; offices desks; hospitals wards…). Buildings
 // with upper storeys get block stairs along the east wall (see world.js `stairLane`), so the east strip is left
@@ -156,7 +158,7 @@ function room(b, k, ctx) {
 // ---- apartments ----------------------------------------------------------------------------------------
 // Upper floors of homes with storeys and of small shops are flats: a corridor beside the stairs and two flats
 // (north and south), each behind a partition with a doorway. world.js builds the partitions from this plan.
-const FLAT_TYPES = new Set(['duplex', 'townhouse', 'lodge', 'cafe', 'pharmacy', 'bookshop', 'market', 'pavilion']);
+const FLAT_TYPES = new Set(['villa', 'duplex', 'townhouse', 'lodge', 'cafe', 'pharmacy', 'bookshop', 'market', 'pavilion']);
 export function apartmentPlan(b) {
   if (!FLAT_TYPES.has(b.type) || !(b.storeys > 0)) return null;
   const hw = b.w / 2 - 0.45,
@@ -508,6 +510,8 @@ export function furnishBuilding(b, ctx) {
   b.purpose = PURPOSE[b.type] || 'home';
   if (flats) b.flats = true;
   for (let k = 0; k <= (b.storeys || 0); k++) {
+    if (b.landmark034) { furnishPlannedFloor(b,k,ctx); furnishLandmark(b,k,ctx); continue; }
+    if (furnishPlannedFloor(b, k, ctx)) continue;
     const r = room(b, k, ctx);
     if (k > 0 && flats) flats.flats.forEach((f, i) => furnishFlat(r, f, i + k));
     else (k === 0 ? plan.ground : plan.upper)(r);

@@ -1,0 +1,22 @@
+{
+  "soldier": {
+    "source": "Meshy_AI_Low Poly Tactical Soldier_1791111438_generate.stl",
+    "sourceSHA256": "a0fae4acf653249df9e903ba46bb0c9bcb897ed554be3b581bc0ee4c6a4bffaa",
+    "originalTriangles": 95720,
+    "triangles": 20008,
+    "vertices": 11316,
+    "bytes": 803888,
+    "height": 1.84,
+    "bones": 18
+  },
+  "suit": {
+    "source": "Meshy_AI_Iron Man_1791101432_texture(1).stl",
+    "sourceSHA256": "c7a9a54bee3646885be48e3033520337da1d50732cfac24ca0cf39a44680f963",
+    "originalTriangles": 63230,
+    "triangles": 18010,
+    "vertices": 9413,
+    "bytes": 677668,
+    "height": 1.84,
+    "bones": 18
+  }
+}
