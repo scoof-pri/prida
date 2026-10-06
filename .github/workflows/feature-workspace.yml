@@ -1,0 +1,26 @@
+name: Feature workspace
+on:
+  push:
+    branches: ['feature/fpv-aircraft-animation-042']
+    paths: ['.github/workflows/feature-workspace.yml']
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+      - name: Pack source and locked dependencies for offline tests
+        run: tar --exclude=.git --exclude=node_modules/.cache -czf "$RUNNER_TEMP/prida-workspace.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prida-feature-workspace
+          path: ${{ runner.temp }}/prida-workspace.tar.gz
+          retention-days: 2
