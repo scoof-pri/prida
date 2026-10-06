@@ -1,10 +1,11 @@
 import { RocketRack, RocketFlights } from './rocket-view.js';
 import { VehicleCameraState } from './vehicle-camera.js';
 import { VehicleMotionTrack, VehiclePresentationClock } from './vehicle-motion.js';
+import { AircraftWreckage } from './aircraft-wreckage.js';
 // Vehicle meshes, recoil, propellers, tracks, capped tracers and a collision-aware follow camera.
 import * as T from 'three';
 import { vehicleModel,animateVehicle,disposeVehicleModel } from './vehicle-models.js';
-import { VEHICLES,vehicleSpec,vehicleDimensions,helicopterGunPose,angleDelta,clamp,direction } from './vehicle-specs.js';
+import { VEHICLES,vehicleSpec,vehicleDimensions,helicopterGunPose,aircraftGunPose,angleDelta,clamp,direction } from './vehicle-specs.js';
 import { modelAsset } from './assets.js';
 import { castMap } from './raycast.js';
 import { groundHeight } from './terrain.js';
@@ -13,6 +14,7 @@ export class VehicleViews {
     this.view=view;this.map=map;this.entries=new Map();this.tracers=[];this.rounds=new Map();this.fxClock=0;
     this.root=new T.Group();this.root.name='vehicles';view.scene.add(this.root);
     this.rocketFlights=new RocketFlights(this.root,view.fx);
+    this.wreckage=new AircraftWreckage(this.root,map,view.fx);
     this.tracerGeometry=new T.CylinderGeometry(.02,.02,1,5);this.shellGeometry=new T.SphereGeometry(.09,6,4);
     this.tracerMaterial=new T.MeshBasicMaterial({color:0xffe49e,toneMapped:false});this.shellMaterial=new T.MeshBasicMaterial({color:0xffce77,toneMapped:false});
     this.followCamera=new VehicleCameraState();this.aimClock=0;this.presentation=new VehiclePresentationClock();
@@ -25,7 +27,11 @@ export class VehicleViews {
     const far=(this.view.viewDistance||250)+35;
     const eye=me?.vehicle?vehicles.find(v=>v.id===me.vehicle):this.view.camera.position;
     for(const v of vehicles) {
+      // A new round may reuse both the map and aircraft ID. The authoritative live
+      // state retires that ID's old fragments and permits a later breakup again.
+      if(v.kind==='plane'&&v.hp>0&&!v.crushed&&this.wreckage.seen.has(v.id))this.wreckage.forget(v.id);
       if(v.crushed) {
+        if(v.kind==='plane'&&v.wreck)this.breakAircraft(v.id,v.wreck,this.entries.get(v.id)?.model,Math.max(0,(state.tick||0)/60-v.wreck.time));
         if(v.decor!==undefined&&!this.hiddenDecor?.has(v.decor)){this.hiddenDecor??=new Set();this.view.scenery?.hideDecor(v.decor);this.hiddenDecor.add(v.decor);}
         continue;
       }
@@ -65,6 +71,7 @@ export class VehicleViews {
     for(const [key,e] of this.entries)if(!live.has(key)){e.rack?.dispose();e.model.removeFromParent();disposeVehicleModel(e.model);for(const m of e.tinted||[])m.dispose();this.entries.delete(key);}
     this.updateRounds((state.vehicleShots||[]).filter(r=>r.weapon!=='rocket'));
     this.rocketFlights.update(state.vehicleShots||[],dt,this.view.camera.position,menu);
+    this.wreckage.update(dt,menu);
     for(let i=this.tracers.length-1;i>=0;i--){const t=this.tracers[i];t.life-=dt;if(t.life<=0){t.mesh.removeFromParent();this.tracers.splice(i,1);}}
     if(me?.vehicle&&!menu) {
       for(const p of state.players)if(p.vehicle){const person=this.view.people.get(p.id);if(person)person.root.visible=false;}
@@ -97,7 +104,7 @@ export class VehicleViews {
         const tx=pt.x-e.x,tz=pt.z-e.z,ty=pt.y-(e.y+1.95);
         view.vehicleGunAim={id:v.id,angle:Math.atan2(tx,tz),pitch:Math.atan2(ty,Math.hypot(tx,tz))};
       } else view.vehicleGunAim=null;
-      const gun=v.kind==='helicopter'?helicopterGunPose({...v,x:e.x,y:e.y,z:e.z,angle:e.angle,pitch:e.pitch,roll:e.roll,barrel:e.barrel}):null;
+      const gun=v.kind==='helicopter'?helicopterGunPose({...v,x:e.x,y:e.y,z:e.z,angle:e.angle,pitch:e.pitch,roll:e.roll,barrel:e.barrel}):v.kind==='plane'?aircraftGunPose({...v,x:e.x,y:e.y,z:e.z,angle:e.angle,pitch:e.pitch,roll:e.roll}):null;
       const fire=gun?.dir||direction(e.turret,e.barrel),origin=gun?.origin||{x:e.x+fire.x*3.85,y:e.y+(plane?1.35:1.95)+fire.y*2,z:e.z+fire.z*3.85};
       const h=castMap(origin,fire,180,this.map,body);
       this.aimPoint??=new T.Vector3();this.aimPoint.set(origin.x+fire.x*h.distance,origin.y+fire.y*h.distance,origin.z+fire.z*h.distance);
@@ -110,6 +117,7 @@ export class VehicleViews {
     for(const [id,m] of this.rounds)if(!live.has(id)){m.removeFromParent();this.rounds.delete(id);}
   }
   event(e) {
+    if(e.type==='vehicle-destroyed'&&e.kind==='plane'&&e.wreck)this.breakAircraft(e.vehicle,e.wreck,this.entries.get(e.vehicle)?.model);
     const fx=this.view.fx;if(e.type==='vehicle-shot') {
       fx?.emit({x:e.x,y:e.y,z:e.z},{x:0,y:0,z:0},0xffedb5,e.kind==='cannon'?1.25:.55,.07);
       if(e.kind==='rocket')fx?.burst(e,3,0xa3a69d,.2,.45,true,1.2);
@@ -125,5 +133,6 @@ export class VehicleViews {
     if(e.type==='vehicle-crushed')fx?.burst(e,12,0x66736a,.25,.9,false,3);
     if(e.type==='door-break')fx?.burst(e,12,0x9f7956,.12,.8,false,3.1);
   }
-  dispose(){this.rocketFlights.dispose();this.root.removeFromParent();for(const e of this.entries.values()){e.rack?.dispose();disposeVehicleModel(e.model);for(const m of e.tinted||[])m.dispose();}this.tracerGeometry.dispose();this.shellGeometry.dispose();this.tracerMaterial.dispose();this.shellMaterial.dispose();}
+  breakAircraft(id,pose,model=null,age=0){if(this.wreckage.seen.has(id)||age>18)return;const source=model||vehicleModel('plane');this.wreckage.spawn(id,source,pose,age);if(!model)disposeVehicleModel(source);}
+  dispose(){this.wreckage.dispose();this.rocketFlights.dispose();this.root.removeFromParent();for(const e of this.entries.values()){e.rack?.dispose();disposeVehicleModel(e.model);for(const m of e.tinted||[])m.dispose();}this.tracerGeometry.dispose();this.shellGeometry.dispose();this.tracerMaterial.dispose();this.shellMaterial.dispose();}
 }

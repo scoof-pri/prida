@@ -4,6 +4,7 @@ import { direction } from './combat.js';
 import { groundHeight } from './terrain.js';
 import { castMap } from './raycast.js';
 import { addObstacle, removeObstacle } from './destruction.js';
+import { fpvSlot, consumeFPV } from './fpv-inventory.js';
 export const DRONE_RULES=Object.freeze({battery:45,range:260,hp:30,speed:27,climb:10,radius:.24,damage:240,blast:5.6,cap:10});
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,Number.isFinite(v)?v:0));
 const yawTurn=(a,b,dt)=>a+clamp(Math.atan2(Math.sin(b-a),Math.cos(b-a)),-4*dt,4*dt);
@@ -12,22 +13,24 @@ export class DroneSystem {
   constructor(a){this.a=a;this.list=[];this.byId=new Map();this.next=0;this.clock=0;this.held=new Map();this.cooldowns=new Map();this.shape=new RAPIER.Ball(DRONE_RULES.radius);}
   get(id){return this.byId.get(id)||null;}
   notice(p,text){this.a.events.push({type:'tech-note',id:p.id,text});}
-  launch(p){
+  launch(p,{selectedOnly=false}={}){
     if(!p||p.bot||p.hp<=0||p.vehicle||p.inBus||p.frozen>0||p.suitFlight||p.droneId||!p.grounded||p.dropping)return false;
-    if(!(p.fpvCharges>0)){this.notice(p,'FIND A DRONE AT A MILITARY BASE OR NOVA');return false;}
+    const slot=fpvSlot(p,selectedOnly);
+    if(slot<0){this.notice(p,'EQUIP AN FPV ITEM FROM A MILITARY BASE OR NOVA');return false;}
     if(this.list.length>=DRONE_RULES.cap||this.clock<(this.cooldowns.get(p.id)||0))return false;
     const f=direction(p.angle),origin={x:p.x,y:p.y+1.3,z:p.z};
     if(castMap(origin,f,1.25,this.a.map,null,true).distance<1.20){this.notice(p,'LAUNCH SPACE BLOCKED');return false;}
+    if(!consumeFPV(p,slot))return false;
     const d={id:'fpv-'+(++this.next),owner:p.id,x:origin.x+f.x*1.15,y:origin.y,z:origin.z+f.z*1.15,
       angle:p.angle,pitch:0,roll:0,vx:0,vy:0,vz:0,battery:DRONE_RULES.battery,signal:1,hp:DRONE_RULES.hp,age:0,fireSafe:true};
     d.obstacle=droneObstacle(d);this.a.addObs(d.obstacle);this.a.colliderBudget?.ensure(d.obstacle);
-    this.list.push(d);this.byId.set(d.id,d);p.fpvCharges--;p.droneId=d.id;p.healing=0;p.using=null;p.emote=0;p.fireHeld=true;
+    this.list.push(d);this.byId.set(d.id,d);this.a.syncHeld(p);p.droneId=d.id;p.healing=0;p.using=null;p.emote=0;p.fireHeld=true;p.useArmed=false;
     this.a.events.push({type:'drone-launch',id:p.id,drone:d.id,x:d.x,y:d.y,z:d.z});this.cooldowns.set(p.id,this.clock+1);return true;
   }
   release(d,explode=false,owner=null){
     if(!d||!this.byId.has(d.id))return false;
     this.byId.delete(d.id);this.list.splice(this.list.indexOf(d),1);this.a.removeObs(d.obstacle);
-    const p=this.a.players.find(p=>p.id===d.owner);if(p?.droneId===d.id){p.droneId=null;p.fireHeld=true;}
+    const p=this.a.players.find(p=>p.id===d.owner);if(p?.droneId===d.id){p.droneId=null;p.fireHeld=true;p.useArmed=false;}
     // Remove the drone before a blast can recurse into the hit that destroyed it.
     if(explode)this.a.blast(d.x,d.y,d.z,DRONE_RULES.blast,DRONE_RULES.damage,owner||p||{id:d.owner});
     this.a.events.push({type:'drone-end',id:d.owner,drone:d.id,x:d.x,y:d.y,z:d.z,exploded:explode});return true;

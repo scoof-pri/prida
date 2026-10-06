@@ -231,7 +231,7 @@ export class Interpolator {
       this.delay += (want - this.delay) * 0.05;
     }
     const pick = (list, key) => new Map((list || []).map((e) => [e.id, { x: e.x, y: e.y, z: e.z, angle: e.angle, pitch: e[key] }]));
-    this.buffer.push({ st: state.st, players: pick(state.players, 'pitch'), bosses: pick(state.bosses, 'pitch'), projectiles: pick(state.projectiles, 'pitch') });
+    this.buffer.push({ st: state.st, players: pick(state.players, 'pitch'), bosses: pick(state.bosses, 'pitch'), projectiles: pick(state.projectiles, 'pitch'), suitRockets: pick(state.suitRockets, 'pitch') });
     while (this.buffer.length > 2 && state.st - this.buffer[0].st > 1000) this.buffer.shift();
   }
   get offset() {
@@ -266,12 +266,18 @@ export class Interpolator {
           if (!pa || !pb || Math.hypot(pb.x - pa.x, pb.z - pa.z) > 12) return e;
           return { ...e, x: lerp(pa.x, pb.x), y: lerp(pa.y, pb.y), z: lerp(pa.z, pb.z), angle: pa.angle === undefined ? e.angle : turn(pa.angle, pb.angle), pitch: pa.pitch === undefined ? e.pitch : lerp(pa.pitch, pb.pitch) };
         });
-    return { ...state, players: move(state.players, 'players', selfId), bosses: move(state.bosses, 'bosses'), projectiles: move(state.projectiles, 'projectiles') };
+    return { ...state, players: move(state.players, 'players', selfId), bosses: move(state.bosses, 'bosses'), projectiles: move(state.projectiles, 'projectiles'), suitRockets: move(state.suitRockets, 'suitRockets') };
   }
 }
 
 // Your own walking, replayed from the last position the server confirmed through every input it has not processed
 // yet. Only the horizontal move is predicted (height, jumps and knock-backs come from the server, eased).
+export function canPredictWalking(p) {
+  if (!p || p.hp <= 0 || p.escalator || p.lift || p.vehicle || p.droneId || p.inBus || p.dropping || p.gliding || p.launched || p.push || p.frozen > 0 || p.cheats?.flight) return false;
+  // Suit thrust and its coast use acceleration, not walking speed. Drone inputs
+  // control the aircraft while its operator remains at the authoritative position.
+  return !(p.gear?.id === 'aegis' && (p.suitFlight || !p.grounded || Math.hypot(p.suitVX || 0, p.suitVZ || 0) >= .05));
+}
 export function moveSpeed(p, i, { weaponMove = 1, perkSpeed = 1, carry = 1 } = {}) {
   if (p.dropping) return 13;
   if (p.gliding) return 10;
@@ -323,7 +329,7 @@ export class Predictor {
   }
   // The confirmed position walked forward through the unconfirmed inputs.
   raw(me, map, ctx) {
-    if (!this.base) return null;
+    if (!this.base || !canPredictWalking(me)) return null;
     let pos = { ...this.base };
     for (const i of this.pending) {
       const n = Math.max(1, Math.hypot(i.x, i.z)),
@@ -336,7 +342,7 @@ export class Predictor {
   // prediction becomes a correction that eases out (a small disagreement glides away instead of snapping; a big
   // one — a respawn, a teleport, a launch — is taken at once).
   server(me, ack, map, ctx) {
-    if (!me) return;
+    if (!canPredictWalking(me)) { this.idle(me); return; }
     const before = this.raw(me, map, ctx);
     // No acknowledgement yet (a new match): nothing sent so far counts.
     this.pending = Number.isInteger(ack) && ack > 0 ? this.pending.filter((i) => i.seq > ack) : [];
@@ -362,6 +368,7 @@ export class Predictor {
   }
   // Where to show you now.
   position(me, map, ctx, dt) {
+    if (!canPredictWalking(me)) { this.idle(me); return null; }
     const pos = this.raw(me, map, ctx);
     if (!pos || !me) return null;
     const k = Math.exp(-dt * 10);

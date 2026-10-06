@@ -798,7 +798,30 @@ export const WEAPONS = [
     iconRot: [0.6, 0.3, 0],
     desc: 'Heals everyone beside it 2 health a second for 25 s.',
   },
+  {
+    name: 'FPV DRONE',
+    ru: 'Remote Drone',
+    model: 'fpv',
+    category: 'item',
+    consumable: true,
+    drone: true,
+    noLoot: true,
+    rarity: 2,
+    mag: 5,
+    found: 1,
+    reserve: 0,
+    damage: 0,
+    interval: 0.3,
+    range: 0,
+    color: '#75e5dc',
+    loot: 0,
+    fp: { len: 0.42, rot: [0, Math.PI, 0] },
+    char: 'item',
+    iconRot: [0.5, 0.6, 0],
+    desc: 'Select and fire to launch. N quick-launches or ends the link. One drone per flight. Find at military bases or NOVA.',
+  },
 ];
+export const FPV_DRONE = WEAPONS.findIndex(w => w.drone);
 // Index of the bare hands, and the items a chest adds on top of its weapon (see items.js rollExtra).
 export const FISTS = WEAPONS.findIndex((w) => w.fists);
 export const MELEE = WEAPONS.flatMap((w, i) => (w.melee ? [i] : []));
@@ -850,5 +873,5 @@ export const GEAR = [
     color: '#8d949c',
     iconRot: [0, 0.5, 0],
   },
-  { id:'aegis',name:'AEGIS SUIT',desc:'NOVA flight armour. Hold SPACE to fly; WASD moves, look up/down to climb/dive. SPACE+C descends. Release SPACE to fall. LMB pulse; hold RMB charged beam. Recharges on the ground.',model:'jetpack',icon:'aegis.svg',starter:false,color:'#66dded',fuel:100 },
+  { id:'aegis',name:'AEGIS SUIT',desc:'NOVA flight armour. Hold SPACE to fly; WASD moves, look up/down to climb/dive. SPACE+C descends. Release SPACE to fall. LMB palm pulse; hold RMB chest beam; R fires one of six rockets. Energy recharges on the ground.',model:'jetpack',icon:'aegis.svg',starter:false,color:'#66dded',fuel:100 },
 ];

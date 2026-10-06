@@ -1,7 +1,10 @@
 // User supplied STL silhouettes, normalized and skinned at build time. No remote requests.
-// Animation clips and additional poses are game-authored; the STL files contain no animation.
+// Uploaded Mixamo FBX motion is retargeted offline and embedded in the GLBs.
+// Procedural clips below are fallback actions only; the source STL files contain no animation.
 import * as T from 'three';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import { prepareImportedClips, importedMelee } from './character-animations.js';
+import { poseSuitWeapons } from './suit-view.js';
 const H=1.84;
 export const CUSTOM_CHARACTER_FILES=['tactical-player','aegis-player','aegis-gauntlets'];
 export const CUSTOM_POSED_BONES=['Hips','Abdomen','Torso','Neck','Head','UpperArmL','LowerArmL','HandL','UpperArmR','LowerArmR','HandR','UpperLegL','LowerLegL','FootL','UpperLegR','LowerLegR','FootR'];
@@ -59,7 +62,8 @@ export function prepareCustomAvatar(asset,kind){
     tracks.push(new T.VectorKeyframeTrack('Hips.position',times,poses.flatMap(p=>[hips.position.x,hips.position.y+p.bob,hips.position.z])));
     clips.push(new T.AnimationClip(name,duration,tracks));
   }
-  asset.animations=clips;return asset;
+  const imported=prepareImportedClips(asset.animations,clips);
+  asset.animations=imported.clips;asset.scene.userData.importedAnimations=imported.imported;return asset;
 }
 let reactorResources;
 function resources(){return reactorResources??={
@@ -71,13 +75,13 @@ function addReactors(root){
   const r=resources(),flames=[];
   const add=(parent,geo,mat,position,rotation=[0,0,0])=>{const o=new T.Mesh(geo,mat);o.position.set(...position);o.rotation.set(...rotation);o.userData.sharedAvatar041=true;parent?.add(o);return o;};
   const torso=root.getObjectByName('Torso'),head=root.getObjectByName('Head');
-  add(torso,r.core,r.glow,[0,.042*H,.086*H],[Math.PI/2,0,0]);
+  add(torso,r.core,r.glow,[0,.042*H,.086*H],[Math.PI/2,0,0]).name='AEGISChestEmitter';
   for(const s of [-1,1])add(head,r.eye,r.glow,[s*.031*H,.046*H,.069*H]);
   for(const side of ['L','R']){
     const foot=root.getObjectByName('Foot'+side);add(foot,r.sole,r.glow,[0,-.072*H,.020*H]);
     const flame=add(foot,r.flame,r.exhaust,[0,-.21*H,.015*H]);flame.visible=false;flames.push(flame);
     const hand=root.getObjectByName('Hand'+side);
-    add(hand,r.palm,r.glow,[0,-.035*H,.035*H],[Math.PI/2,0,0]);
+    add(hand,r.palm,r.glow,[0,-.035*H,.035*H],[Math.PI/2,0,0]).name='AEGISPalm'+side;
     const f=add(hand,r.flame,r.exhaust,[0,-.128*H,.012*H]);f.scale.setScalar(.65);f.visible=false;flames.push(f);
   }
   root.userData.thrusters041=flames;
@@ -112,7 +116,7 @@ export function poseCustomAvatar(v,p,dt,extra={}){
     }
     targetQuaternion.copy(qx(-v.lean*.60));v.bones041.Head?.quaternion.slerp(targetQuaternion,blend);
     targetQuaternion.identity();v.bones041.Torso?.quaternion.slerp(targetQuaternion,blend*.8);
-  }else if(extra.fists&&!suit){
+  }else if(extra.fists&&!suit&&!importedMelee(v.animation)){
     for(const[s,side]of [[1,'L'],[-1,'R']]){
       targetQuaternion.copy(qx(-.58)).multiply(qz(-s*angles[0]-s*.04));v.bones041['UpperArm'+side]?.quaternion.copy(targetQuaternion);
       targetQuaternion.copy(qy(-s*1.35)).multiply(qz(-s*(angles[1]-angles[0])));v.bones041['LowerArm'+side]?.quaternion.copy(targetQuaternion);
@@ -124,9 +128,10 @@ export function poseCustomAvatar(v,p,dt,extra={}){
     v.bones041['UpperArm'+side]?.quaternion.copy(targetQuaternion);
     targetQuaternion.copy(qz(angles[1]-angles[0]));v.bones041['LowerArm'+side]?.quaternion.copy(targetQuaternion);
   }
-  for(const f of v.body.userData.thrusters041||[]){f.visible=flight;f.scale.y=(p.sprinting?1.35:1)*(.91+.09*Math.sin((v.emoteClock||0)*33));}
+  for(const f of v.body.userData.thrusters041||[]){f.visible=flight;f.scale.y=(p.sprinting?1.35:1)*(.45+.55*(p.suitSpool??1))*(.91+.09*Math.sin((v.emoteClock||0)*33));}
   // Socket translation follows the hand; orientation follows authoritative aim (not the STL's bind pose).
   if(v.guns.length){v.body.updateWorldMatrix(true,true);const hand=v.bones041.HandR;if(hand){hand.getWorldPosition(handPoint);v.body.worldToLocal(handPoint);v.body.getWorldQuaternion(inverseQ).invert();worldQ.setFromEuler(new T.Euler(-(p.pitch||0),p.angle||0,0,'YXZ')).multiply(qy(Math.PI));
     for(const g of v.guns){if(!g.userData.customMount041)continue;g.position.copy(handPoint);g.quaternion.copy(inverseQ).multiply(worldQ);}}}
+  if(suit)poseSuitWeapons(v,p,dt);
 }
 export function disposeAvatarSkeleton(root){const seen=new Set();root.traverse(o=>{if(o.isSkinnedMesh&&!seen.has(o.skeleton)){seen.add(o.skeleton);o.skeleton.dispose();}});}

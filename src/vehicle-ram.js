@@ -1,6 +1,6 @@
 // Tank ramming uses the native destruction API, outside Rapier's query callbacks.
 // Contact tests are local to the tank's swept footprint; terrain/boundary colliders are never deleted.
-import { vehicleDimensions, clamp, angleDelta } from './vehicle-specs.js';
+import { vehicleDimensions, clamp, angleDelta, aircraftShape, aircraftBounds, aircraftTouchesBox } from './vehicle-specs.js';
 import { leafBounds, leafTouchesBox } from './architecture-geometry.js';
 
 export function ramContacts(map, vehicle, movement) {
@@ -11,11 +11,11 @@ export function ramContacts(map, vehicle, movement) {
   const old=movement.oldAngle??vehicle.angle,turn=angleDelta(old,vehicle.angle);
   for(let i=0;i<=count;i++) {
     const t=i/count;
-    poses.push({x:vehicle.x+movement.x*t+dx*.16,y:vehicle.y+size.h/2+movement.y*t,z:vehicle.z+movement.z*t+dz*.16,
+    poses.push(plane?aircraftShape({...vehicle,x:vehicle.x+movement.x*t+dx*.16,y:vehicle.y+movement.y*t,z:vehicle.z+movement.z*t+dz*.16,angle:old+turn*t}):{x:vehicle.x+movement.x*t+dx*.16,y:vehicle.y+size.h/2+movement.y*t,z:vehicle.z+movement.z*t+dz*.16,
       w:size.w+.06,h:size.h-.08,t:size.d+.06,yaw:old+turn*t});
   }
   let x0=Infinity,x1=-Infinity,z0=Infinity,z1=-Infinity;
-  for(const pose of poses){const b=leafBounds(pose);x0=Math.min(x0,b.x-b.w/2);x1=Math.max(x1,b.x+b.w/2);z0=Math.min(z0,b.z-b.d/2);z1=Math.max(z1,b.z+b.d/2);}
+  for(const pose of poses){const b=plane?aircraftBounds(pose):leafBounds(pose);x0=Math.min(x0,b.x-b.w/2);x1=Math.max(x1,b.x+b.w/2);z0=Math.min(z0,b.z-b.d/2);z1=Math.max(z1,b.z+b.d/2);}
   const found=[],seen=new Set();
   const visit=o=>{
     if(seen.has(o)||o===vehicle.obstacle||o.vehicleId===vehicle.id||o.nocollide)return;
@@ -24,7 +24,7 @@ export function ramContacts(map, vehicle, movement) {
     if((!plane||!vehicle.airborne)&&o.y+o.h/2<=vehicle.y+.18)return;
     const destructible=o.vehicleId!==undefined||o.doorId!==undefined||Number.isFinite(o.hp)||o.part==='rubble'||o.part==='roofplant';
     if(!destructible)return;
-    if(poses.some(p=>leafTouchesBox(p,o,.005)))found.push(o);
+    if(poses.some(p=>plane?aircraftTouchesBox(p,o,.005):o.aircraftShape?aircraftTouchesBox(o,{...leafBounds(p),doorLeaf:p},.005):leafTouchesBox(p,o,.005)))found.push(o);
   };
   if(map.obstacles.grid)map.obstacles.grid.query(x0,z0,x1,z1,visit);else for(const o of map.obstacles)visit(o);
   return found.sort((a,b)=>Math.hypot(a.x-vehicle.x,a.z-vehicle.z)-Math.hypot(b.x-vehicle.x,b.z-vehicle.z)).slice(0,16);

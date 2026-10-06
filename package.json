@@ -1,6 +1,6 @@
 {
   "name": "prida",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "",
   "main": "index.js",
   "directories": {
@@ -14,7 +14,8 @@
     "build:hf": "node scripts/make-hf-space.mjs",
     "build:crazygames": "node scripts/package-crazygames.mjs",
     "build:crazygames:full": "node scripts/package-crazygames.mjs --full",
-    "export:full": "node scripts/package-full.mjs"
+    "export:full": "node scripts/package-full.mjs",
+    "verify:release": "node scripts/build-update.mjs --check && node prida-update.mjs --check"
   },
   "keywords": [],
   "author": "",

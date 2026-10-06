@@ -1,4 +1,7 @@
 export { finishCarContact, helicopterGunPose } from './mobility-physics.js';
+export { aircraftShape, aircraftBounds, aircraftColliderParts, aircraftQuaternion, aircraftTouchesBox, aircraftClosestPoint, aircraftGunPose, sweepAircraft } from './aircraft-geometry.js';
+export { aircraftImpactDamage } from './aircraft-physics.js';
+import { integrateAircraft } from './aircraft-physics.js';
 import { integrateCar, integrateHelicopter } from './mobility-physics.js';
 import { refillArmour } from './tank-armour.js';
 import { initRocketState } from './vehicle-rockets.js';
@@ -53,50 +56,24 @@ export function integrateVehicle(v,c,dt) {
   const s=vehicleSpec(v); dt=clamp(dt,0,1/15);
   if(v.kind==='car')return integrateCar(v,c,dt,s);
   if(v.kind==='helicopter')return integrateHelicopter(v,c,dt,s);
+  if(v.kind==='plane')return integrateAircraft(v,c,dt,s);
   const working=!!v.driver && v.hp>0 && v.fuel>0;
   const throttle=working?c.throttle:0,steer=working?c.steer:0;
   const wanted=(throttle>=0?s.max:s.reverse)*throttle;
-  const braking=c.brake||(!working&&v.kind!=='plane');
+  const braking=c.brake||!working;
   v.speed=approach(v.speed,braking?0:wanted,braking?s.brake:Math.abs(throttle)>.01?s.accel:s.drag,dt);
   v.steer=approach(v.steer,steer,4,dt);
-  let turn=s.turn;
-  if(v.kind==='car')turn*=Math.min(1,Math.abs(v.speed)/3.5)*Math.sign(v.speed||1);
-  else if(v.kind==='plane')turn*=v.airborne?clamp(Math.abs(v.speed)/25,.45,1.15):Math.min(1,Math.abs(v.speed)/6);
   const old=v.angle;
-  let yawStep=-steer*turn*dt;
-  if(v.kind==='plane' && working && Number.isFinite(c.lookYaw)) {
-    // Camera is the flight director. WASD never rewrites the player's mouse-look angles.
-    const wantedYaw=c.lookYaw-steer*.55;
-    yawStep=clamp(angleDelta(old,wantedYaw),-turn*dt,turn*dt);
-  }
+  const yawStep=-steer*s.turn*dt;
   v.angle=Math.atan2(Math.sin(old+yawStep),Math.cos(old+yawStep));
   v.engine=approach(v.engine,working?Math.max(.18,Math.abs(throttle)):0,2,dt);
-  if(working)v.fuel=Math.max(0,v.fuel-dt*(.04+.065*v.engine+(v.kind==='plane' ? .05 : 0)));
-  if(v.kind==='plane') {
-    const fast=working && v.speed>=s.takeoff;
-    // Pitch-up with W after the takeoff run is sufficient. Space/C remain optional touch/keyboard assists.
-    const requested=Number.isFinite(c.lookPitch)?c.lookPitch:c.climb*.42;
-    const assisted=clamp(requested+(Number.isFinite(c.lookPitch)?c.climb*.36:0),-.65,.72);
-    const wantPitch=working && (fast||v.airborne)?assisted:v.airborne?-.18:0;
-    v.pitch=approach(v.pitch,wantPitch,.65,dt);
-    const bank=v.airborne?clamp(-yawStep/Math.max(dt,.001)*.55,-.58,.58):0;
-    v.roll=approach(v.roll,bank,1.3,dt);
-    if(!v.airborne&&fast&&assisted>.07&&v.pitch>.055) {
-      v.airborne=true;
-      // Positive initial separation prevents snap-to-ground from cancelling takeoff on the same tick.
-      v.vy=Math.max(2.8,Math.sin(v.pitch)*v.speed);
-    }
-    if(v.airborne) {
-      const stall=clamp((s.stall-v.speed)/s.stall,0,1);
-      const climb=Math.sin(v.pitch)*Math.max(v.speed,10)-stall*13-(working?0:2.5);
-      v.vy=approach(v.vy,climb,32,dt);
-    } else v.vy=-1;
-  } else {v.roll=approach(v.roll,-v.steer*v.speed*.004,1,dt);v.vy=Math.max(-20,(v.vy||0)-20*dt);}
+  if(working)v.fuel=Math.max(0,v.fuel-dt*(.04+.065*v.engine));
+  v.roll=approach(v.roll,-v.steer*v.speed*.004,1,dt);v.vy=Math.max(-20,(v.vy||0)-20*dt);
   v.wheelPhase=(v.wheelPhase+v.speed*dt/s.wheel)%(Math.PI*200);
   v.primaryCd=Math.max(0,v.primaryCd-dt);v.secondaryCd=Math.max(0,v.secondaryCd-dt);
   v.heat=Math.max(0,v.heat-(s.mg?.cool||.2)*dt);
   if(v.overheated&&v.heat<.30)v.overheated=false;
-  const f=direction(v.angle,v.kind==='plane'&&v.airborne?v.pitch:0);
+  const f=direction(v.angle);
   return {x:f.x*v.speed*dt,y:v.vy*dt,z:f.z*v.speed*dt,oldAngle:old};
 }
 export function weaponReady(v,secondary=false) {

@@ -4,6 +4,7 @@ import {Arena,initPhysics} from '../src/simulation.js';
 import {groundHeight} from '../src/terrain.js';
 import {validateConstruction,BUILD_MATERIALS} from '../src/construction.js';
 import {DRONE_RULES} from '../src/drone-system.js';
+import {fpvCount,receiveFPV} from '../src/fpv-inventory.js';
 import {SUIT_RULES,BOMB_RULES} from '../src/technology-system.js';
 import {NetFeed,Mirror} from '../src/netcode.js';
 
@@ -58,8 +59,8 @@ test('0.40 unsupported or obstructed construction never spends resources',()=>{
 test('0.40 FPV is finite, server-owned, range/battery state replicates, and deliberate fire detonates after arming',()=>{
   const a=new Arena({seed:91726,mode:'debug',bots:0,allowCheats:true,size:'city'});
   try{
-    const p=a.addPlayer('fpv','FPV');p.fpvCharges=2;place(a,p,{x:-700,z:-900,angle:0});
-    input(a,p,{droneToggle:true},1);assert.ok(p.droneId);assert.equal(p.fpvCharges,1);const id=p.droneId,d=a.drones.get(id);assert.ok(d);assert.equal(d.battery<=DRONE_RULES.battery,true);
+    const p=a.addPlayer('fpv','FPV');receiveFPV(p);receiveFPV(p);place(a,p,{x:-700,z:-900,angle:0});
+    input(a,p,{droneToggle:true},1);assert.ok(p.droneId);assert.equal(fpvCount(p),1);const id=p.droneId,d=a.drones.get(id);assert.ok(d);assert.equal(d.battery<=DRONE_RULES.battery,true);
     input(a,p,{droneToggle:false,fire:false,drive:0},45);const online=snap(a,p).state.drones.find(q=>q.id===id);assert.ok(online);assert.ok(online.signal>=0&&online.signal<=1);assert.ok(online.battery<DRONE_RULES.battery);
     input(a,p,{fire:true},1);assert.equal(a.drones.get(id),null);assert.equal(p.droneId,null);assert.ok(a.drainEvents().some(e=>e.type==='drone-end'&&e.exploded));
   }finally{a.dispose();}
@@ -69,7 +70,7 @@ test('0.40 NOVA pickups are finite and AEGIS provides bounded energy flight and 
   const a=new Arena({seed:91726,mode:'debug',bots:0,allowCheats:true,size:'city'});
   try{
     const p=a.addPlayer('tech','TECH'),fpv=a.technology.items.find(i=>i.kind==='fpv'),suit=a.technology.items.find(i=>i.kind==='aegis');assert.ok(fpv&&suit);
-    assert.equal(nearItem(a,p,fpv),true);assert.equal(p.fpvCharges,1);assert.equal(fpv.available,false);
+    assert.equal(nearItem(a,p,fpv),true);assert.equal(fpvCount(p),1);assert.equal(fpv.available,false);
     assert.equal(nearItem(a,p,suit),true);assert.equal(p.gear.id,'aegis');assert.equal(suit.available,false);assert.equal(p.gear.fuel,SUIT_RULES.energy);
     input(a,p,{suitToggle:true,ascend:1},1);input(a,p,{suitToggle:false,ascend:1},90);assert.equal(p.suitFlight,true);assert.ok(p.y>2);assert.ok(p.gear.fuel<SUIT_RULES.energy&&p.gear.fuel>0);
     const energy=p.gear.fuel;input(a,p,{fire:true},1);assert.ok(p.gear.fuel<=energy-SUIT_RULES.shotCost+.01);

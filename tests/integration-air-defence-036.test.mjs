@@ -2,7 +2,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import * as T from 'three';
 import {Arena,initPhysics} from '../src/simulation.js';
-import {freshVehicle,vehicleDimensions} from '../src/vehicle-specs.js';
+import {freshVehicle,vehicleDimensions,aircraftColliderParts} from '../src/vehicle-specs.js';
 import {vehicleModel,animateVehicle,disposeVehicleModel} from '../src/vehicle-models.js';
 import {RocketRack} from '../src/rocket-view.js';
 import {rocketSpec,rocketMuzzle} from '../src/vehicle-rockets.js';
@@ -29,8 +29,15 @@ for(const variant of ['twin','sam'])test(`actual Three: ${variant} finite animat
 });
 function positionVehicle(a,v,patch){
  Object.assign(v,patch,{active:true,_changed:true});updateVehicleObstacle(a.map,v.obstacle,vehicleBody(v));
- const p=v.obstacle.doorLeaf,c=a.colliders.get(v.obstacle);assert.ok(c&&!Array.isArray(c));
- c.setTranslation({x:p.x,y:p.y,z:p.z});c.setRotation({x:0,y:Math.sin(v.angle/2),z:0,w:Math.cos(v.angle/2)});a.vehicles.wake(v);a.physicsDirty=true;
+ const c=a.colliders.get(v.obstacle);
+ if(v.kind==='plane'){
+  const parts=aircraftColliderParts(v);assert.ok(Array.isArray(c));assert.equal(c.length,parts.length);
+  for(let i=0;i<parts.length;i++){const p=parts[i];assert.ok(c[i].isValid());c[i].setTranslation({x:p.x,y:p.y,z:p.z});c[i].setRotation(p.rotation);}
+ }else{
+  const p=v.obstacle.doorLeaf;assert.ok(c&&!Array.isArray(c));
+  c.setTranslation({x:p.x,y:p.y,z:p.z});c.setRotation({x:0,y:Math.sin(v.angle/2),z:0,w:Math.cos(v.angle/2)});
+ }
+ a.vehicles.wake(v);a.physicsDirty=true;
 }
 test('actual Arena: guided target is server-selected, firing is manual, and packets retain lock/projectile state',async()=>{
  await initPhysics();const a=new Arena({seed:91726,bots:0,mode:'debug',allowCheats:true});

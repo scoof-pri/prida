@@ -17,9 +17,9 @@ export function restorePose(v) {
   v.posed ??= (v.posedNames || POSED_BONES)
     .map((n) => rigBone(v.body, n))
     .filter(Boolean)
-    .map((bone) => ({ bone, base: bone.quaternion.clone() }));
-  for (const b of v.posed) b.bone.quaternion.copy(b.base);
+    .map((bone) => ({ bone, base: bone.quaternion.clone(), position: bone.position.clone() }));
+  for (const b of v.posed) { b.bone.quaternion.copy(b.base); b.bone.position.copy(b.position); }
 }
 export function savePose(v) {
-  for (const b of v.posed || []) b.base.copy(b.bone.quaternion);
+  for (const b of v.posed || []) { b.base.copy(b.bone.quaternion); b.position.copy(b.bone.position); }
 }

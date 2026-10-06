@@ -106,7 +106,7 @@ export function fireVehicleRocket(system,v,p) {
     return false;
   }
   if (!infinite) v.rocketAmmo--;v.rocketCd=spec.interval;v.rocketShot++;if(spec.burst)v.rocketBurstLeft=Math.max(0,(v.rocketBurstLeft||0)-1);v.rocketCursor=(m.slot+1)%spec.magazine;v._changed=true;
-  const f=turn({x:0,y:0,z:number(v.speed)*.65},number(v.angle),v.airborne?number(v.pitch):0);
+  const f=v.kind==='plane'&&Number.isFinite(v.vx)&&Number.isFinite(v.vz)?{x:v.vx*.65,y:number(v.vy)*.65,z:v.vz*.65}:turn({x:0,y:0,z:number(v.speed)*.65},number(v.angle),v.airborne?number(v.pitch):0);
   system.rounds.push({id:++system.nextShot,weapon:'rocket',kind:v.kind,variant:v.variant,vehicle:v.id,owner:p.id,team:p.team,
     ...m.origin,dx:m.dir.x*spec.speed+f.x,dy:m.dir.y*spec.speed+f.y,dz:m.dir.z*spec.speed+f.z,
     life:spec.life,age:0,travelled:0,slot:m.slot,target:spec.guided?v.lockTarget:null});
@@ -214,6 +214,6 @@ function guidedDirection(system,r,spec,dt){
   const target=system.get(r.target),owner=crew(system,r.owner)||{id:r.owner,team:r.team};
   if(!airTarget(system,target,{id:r.vehicle},owner)){r.target=null;return old;}
   const distance=Math.hypot(target.x-r.x,target.y+1.4-r.y,target.z-r.z),lead=Math.min(.8,distance/Math.max(80,Math.hypot(r.dx,r.dy,r.dz))*.6);
-  const f=target.kind==='helicopter'?{x:target.vx||0,y:target.vy||0,z:target.vz||0}:turn({x:0,y:0,z:target.speed||0},target.angle||0,target.pitch||0);
+  const f=target.kind==='helicopter'||(target.kind==='plane'&&Number.isFinite(target.vx)&&Number.isFinite(target.vz))?{x:target.vx||0,y:target.vy||0,z:target.vz||0}:turn({x:0,y:0,z:target.speed||0},target.angle||0,target.pitch||0);
   return turnToward(old,{x:target.x+f.x*lead-r.x,y:target.y+1.4+(target.vy??f.y)*lead-r.y,z:target.z+f.z*lead-r.z},spec.turnRate*dt);
 }

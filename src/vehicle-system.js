@@ -5,7 +5,7 @@ import { ramAhead } from './vehicle-ram.js';
 import { updateVehicleObstacle, destructionStamp } from './vehicle-spatial.js';
 // Server-authoritative vehicle state. No Three.js objects or client-supplied positions enter this system.
 import { stepSiteStructures } from './expansion-world.js';
-import { VEHICLES, vehicleSpec, vehicleDimensions, finishCarContact, helicopterGunPose, USE_RANGE, MAX_ALTITUDE, controls, integrateVehicle, freshVehicle, clamp, approach, angleDelta, direction, consumeShot } from './vehicle-specs.js';
+import { VEHICLES, vehicleSpec, vehicleDimensions, finishCarContact, helicopterGunPose, aircraftShape, aircraftBounds, aircraftColliderParts, aircraftTouchesBox, aircraftClosestPoint, aircraftGunPose, aircraftImpactDamage, USE_RANGE, MAX_ALTITUDE, controls, integrateVehicle, freshVehicle, clamp, approach, angleDelta, direction, consumeShot } from './vehicle-specs.js';
 import { castMap } from './raycast.js';
 import { rayBox } from './combat.js';
 import { groundHeight } from './terrain.js';
@@ -16,6 +16,7 @@ export function vehiclePose(v) {
   const s=vehicleDimensions(v);return {x:v.x,y:v.y+s.h/2,z:v.z,w:s.w,h:s.h,t:s.d,yaw:v.angle};
 }
 export function vehicleBody(v) {
+  if(v.kind==='plane'){const shape=aircraftShape(v);return {...aircraftBounds(shape),aircraftShape:shape,part:'vehicle',nocollide:false,ground:0,vehicleId:v.id,hp:v.hp,color:0x607565};}
   const pose=vehiclePose(v);return {...leafBounds(pose),part:'vehicle',nocollide:false,ground:0,vehicleId:v.id,doorLeaf:pose,hp:v.hp,color:0x607565};
 }
 export function nearestVehicle(map,p,vehicles=map.vehicles||[]) {
@@ -72,11 +73,11 @@ export class VehicleSystem {
       if(o.vehicleId===undefined||seen.has(o))return;seen.add(o);
       const v=this.get(o.vehicleId);if(!v||v.crushed)return;
       let c=a.colliders.get(o);
-      if(!c||Array.isArray(c)||c.isValid?.()===false){
+      if(!c||(Array.isArray(c)?!c.length||c.some(part=>!part||part.isValid?.()===false):c.isValid?.()===false)){
         if(Array.isArray(c))for(const part of c)if(part&&part.isValid?.()!==false)a.world.removeCollider(part,false);
         a.addCollider(o);c=a.colliders.get(o);
       }
-      if(c&&!Array.isArray(c)&&c.isEnabled?.()===false){c.setEnabled(true);a.physicsDirty=true;}
+      for(const part of Array.isArray(c)?c:c?[c]:[])if(part.isEnabled?.()===false){part.setEnabled(true);a.physicsDirty=true;}
     };
     for(const p of a.players)if(p.hp>0&&!p.inBus){
       if(a.map.obstacles.grid)a.map.obstacles.grid.query(p.x-14,p.z-14,p.x+14,p.z+14,ensure);
@@ -129,7 +130,13 @@ export class VehicleSystem {
     const b=this.a.bodies.get(p.id);if(b){b.collider.setEnabled(false);b.body.setTranslation({x:p.x,y:p.y+.84,z:p.z},false);b.body.setNextKinematicTranslation({x:p.x,y:p.y+.84,z:p.z});}
     return true;
   }
-  rotationFree(v,next) {
+  rotationFree(v,next,pitch=v.pitch,roll=v.roll) {
+    if(v.kind==='plane'){
+      const shape=aircraftShape({...v,angle:next,pitch,roll}),b=aircraftBounds(shape);let blocked=false;
+      const visit=o=>{if(o!==v.obstacle&&!o.nocollide&&aircraftTouchesBox(shape,o,.045))blocked=true;};
+      if(this.a.map.obstacles.grid)this.a.map.obstacles.grid.query(b.x-b.w/2,b.z-b.d/2,b.x+b.w/2,b.z+b.d/2,visit);else for(const o of this.a.map.obstacles)visit(o);
+      return !blocked;
+    }
     const pose=vehiclePose({...v,angle:next}),bounds=leafBounds(pose);let blocked=false;
     this.a.map.obstacles.grid.query(bounds.x-bounds.w/2,bounds.z-bounds.d/2,bounds.x+bounds.w/2,bounds.z+bounds.d/2,o=>{
       if(o!==v.obstacle&&!o.nocollide&&leafTouchesBox(pose,o,.055))blocked=true;
@@ -138,6 +145,7 @@ export class VehicleSystem {
   }
   move(v,m,dt) {
     const a=this.a,s=vehicleDimensions(v),o=v.obstacle,c=a.colliders.get(o);if(!c)return;
+    if(v.kind==='plane'&&Array.isArray(c))return this.moveAircraft(v,m,dt,c);
     const wasGrounded=v._grounded!==false,impactVelocity=v.vy;
     // A settled, stationary vehicle is a sleeping collider. Engine/weapon clocks may still advance.
     if(v._grounded && !v.airborne && m.y<=0 && Math.hypot(m.x,m.z)<1e-6 && Math.abs(angleDelta(m.oldAngle,v.angle))<1e-7 && !this.supportChanged) {
@@ -206,6 +214,63 @@ export class VehicleSystem {
       if(this.rammed.size>256)for(const [key,tick] of this.rammed)if(a.tick-tick>180)this.rammed.delete(key);
     }
   }
+  moveAircraft(v,m,dt,colliders) {
+    const a=this.a,o=v.obstacle,own=new Set(colliders.map(c=>c.handle));
+    const wasGrounded=v._grounded!==false,velocity={x:v.vx||0,y:v.vy||0,z:v.vz||0};
+    if(v._grounded&&!v.airborne&&Math.hypot(m.x,m.z)<1e-7&&m.y<=0&&!this.supportChanged){v.vy=0;return;}
+    if(ramAhead(this,v,m)&&a.physicsDirty){a.world.step();a.physicsDirty=false;}
+    if(v.crushed||v.hp<=0)return;
+    const old={angle:m.oldAngle??o.aircraftShape.angle,pitch:m.oldPitch??o.aircraftShape.pitch,roll:m.oldRoll??o.aircraftShape.roll};
+    const change={angle:angleDelta(old.angle,v.angle),pitch:v.pitch-old.pitch,roll:v.roll-old.roll},steps=Math.max(1,Math.ceil(Math.max(...Object.values(change).map(Math.abs))/.018));
+    for(let k=1;k<=steps;k++)if(!this.rotationFree(v,old.angle+change.angle*k/steps,old.pitch+change.pitch*k/steps,old.roll+change.roll*k/steps)){
+      Object.assign(v,old);v.yawRate=v.pitchRate=0;break;
+    }
+    const parts=aircraftColliderParts(v);
+    for(let i=0;i<colliders.length;i++){const p=parts[i];colliders[i].setTranslation({x:p.x,y:p.y,z:p.z});colliders[i].setRotation(p.rotation);}
+    let moved={x:m.x,y:m.y,z:m.z},wheelGround=false,bodyGround=false,impact=0;
+    this.controller.disableSnapToGround();this.controller.disableAutostep();this.controller.setSlideEnabled(!v.airborne);
+    try{
+      // Each component constrains the same rigid-body displacement. All sibling hulls
+      // are excluded, so a wing cannot collide with its own fuselage or landing gear.
+      for(let i=0;i<colliders.length;i++){
+        this.controller.computeColliderMovement(colliders[i],moved,undefined,undefined,q=>!own.has(q.handle)&&!q.parent());
+        moved={...this.controller.computedMovement()};
+        for(let j=0;j<(this.controller.numComputedCollisions?.()||0);j++){
+          const n=this.controller.computedCollision(j)?.normal1;if(!n)continue;
+          const closing=Math.max(0,-velocity.x*n.x-velocity.y*n.y-velocity.z*n.z);
+          if(n.y>.6){if(parts[i].id.startsWith('wheel'))wheelGround=true;else bodyGround=true;}
+          else impact=Math.max(impact,closing);
+        }
+      }
+    }finally{this.controller.setSlideEnabled(true);this.controller.enableAutostep(.24,.4,false);}
+    const desired=Math.hypot(m.x,m.z),actual=Math.hypot(moved.x,moved.z),floor=groundHeight(v.x+moved.x,v.z+moved.z,a.map)+.07;
+    const rising=v.airborne&&v.vy>0&&moved.y>0,grounded=!rising&&(wheelGround||bodyGround||v.y+moved.y<=floor+.025);
+    if(desired>.02&&actual<desired*.85)impact=Math.max(impact,(desired-actual)/Math.max(dt,.001));
+    if(impact>3)this.damage(v.id,aircraftImpactDamage(v.speed,impact),null,{kind:'collision'});
+    if(v.crushed)return;
+    if(v.airborne&&grounded){
+      const landing=aircraftImpactDamage(v.speed,Math.max(0,-velocity.y),{landing:true,pitch:v.pitch,roll:v.roll});
+      const strike=bodyGround&&v.speed>7?Math.max(100,v.speed*v.speed*.5):0;
+      if(landing+strike>0)this.damage(v.id,landing+strike,null,{kind:'collision'});
+      if(v.crushed)return;
+      v.airborne=false;v.pitch=v.roll=v.pitchRate=v.yawRate=0;v.stalled=false;
+    }
+    if(desired>.02&&actual<desired*.90){const k=actual/desired;v.speed*=k;v.vx*=k;v.vz*=k;}
+    // Clamp the whole oriented envelope at world limits, rather than losing a wing
+    // outside the map while the aircraft's centre is still inside it.
+    v.x+=moved.x;v.z+=moved.z;v.y=clamp(Math.max(floor,v.y+moved.y),-20,MAX_ALTITUDE);
+    const b=aircraftBounds(v),hx=b.w/2+.10,hz=b.d/2+.10;
+    v.x+=clamp(b.x,-a.map.limit.x+hx,a.map.limit.x-hx)-b.x;v.z+=clamp(b.z,-a.map.limit.z+hz,a.map.limit.z-hz)-b.z;
+    if(v.y>=MAX_ALTITUDE){v.vy=Math.min(v.vy,0);v.pitch=Math.min(v.pitch,0);}
+    v._grounded=grounded;if(grounded)v.vy=0;
+    if(updateVehicleObstacle(a.map,o,vehicleBody(v)))v._changed=true;
+    const next=aircraftColliderParts(v);for(let i=0;i<colliders.length;i++){const p=next[i];colliders[i].setTranslation({x:p.x,y:p.y,z:p.z});colliders[i].setRotation(p.rotation);}
+    a.physicsDirty=true;
+    if(v.speed>3){const driver=a.players.find(p=>p.id===v.driver);
+      for(const p of a.players)if(!p.vehicle&&p.hp>0&&aircraftClosestPoint(o,{x:p.x,y:p.y+.84,z:p.z}).distance<.48){const key=v.id+':'+p.id;
+        if(a.tick-(this.rammed.get(key)||-100)>45){this.rammed.set(key,a.tick);a.damage(driver,p,Math.min(110,15+v.speed*3));p.push={x:(v.vx||0)*.7,z:(v.vz||0)*.7};}}
+    }
+  }
   step(dt) {
     const a=this.a,stamp=destructionStamp(a);this.clock+=dt;
     this.ensureNearbyColliders(dt);
@@ -272,6 +337,11 @@ export class VehicleSystem {
     stepSiteStructures(this.a);
   }
   aim(v,p,secondary) {
+    if(v.kind==='plane'){
+      const pose=aircraftGunPose(v,secondary),len=Math.hypot(pose.origin.x-pose.base.x,pose.origin.y-pose.base.y,pose.origin.z-pose.base.z),reach=castMap(pose.base,pose.dir,len,this.a.map,v.obstacle).distance;
+      if(reach<len-.015)for(const k of ['x','y','z'])pose.origin[k]=pose.base[k]+pose.dir[k]*Math.max(0,reach-.025);
+      return pose;
+    }
     if(v.kind==='helicopter'){
       const pose=helicopterGunPose(v),range=.78,hit=castMap(pose.base,pose.dir,range,this.a.map,v.obstacle);
       if(hit.distance<range-.03){const reach=Math.max(0,hit.distance-.03);for(const k of ['x','y','z'])pose.origin[k]=pose.base[k]+pose.dir[k]*reach;}
@@ -299,8 +369,8 @@ export class VehicleSystem {
     if(!consumeShot(v,secondary))return;
     const a=this.a,s=vehicleSpec(v),{origin,dir}=this.aim(v,p,secondary);
     if(secondary){
-      const jitter=(a.random()-.5)*.012,dx=v.kind==='helicopter'?{...dir}:direction(v.turret+jitter,v.barrel+(a.random()-.5)*.009);
-      if(v.kind==='helicopter'){dx.x+=jitter;dx.y+=(a.random()-.5)*.009;const len=Math.hypot(dx.x,dx.y,dx.z);for(const key of ['x','y','z'])dx[key]/=len;}
+      const jitter=(a.random()-.5)*.012,dx=v.kind==='helicopter'||v.kind==='plane'?{...dir}:direction(v.turret+jitter,v.barrel+(a.random()-.5)*.009);
+      if(v.kind==='helicopter'||v.kind==='plane'){dx.x+=jitter;dx.y+=(a.random()-.5)*.009;const len=Math.hypot(dx.x,dx.y,dx.z);for(const key of ['x','y','z'])dx[key]/=len;}
       const h=this.ray(origin,dx,s.mg.range,p,v.obstacle),to={x:origin.x+dx.x*h.distance,y:origin.y+dx.y*h.distance,z:origin.z+dx.z*h.distance};
       if(h.victim)a.damage(p,h.victim,s.mg.damage);
       else if(h.boss)a.bosses.damage(h.boss,s.mg.damage,p);
@@ -341,10 +411,12 @@ export class VehicleSystem {
     if(absorbed.broken)this.a.events.push({type:'vehicle-armour-break',vehicle:v.id,face:absorbed.face,id:attacker?.id,x:v.x,y:v.y+1.5,z:v.z});
     if(v.hp>0)return;
     v.active=true;
+    const wreck=v.kind==='plane'?{...aircraftShape(v),vx:Number.isFinite(v.vx)?v.vx:Math.sin(v.angle)*v.speed,vy:v.vy||0,vz:Number.isFinite(v.vz)?v.vz:Math.cos(v.angle)*v.speed,time:(this.a.tick||0)/60}:null;
     if(driver){this.exit(driver,{force:true,quiet:true});driver.shield=0;this.a.damage(attacker,driver,110);}
     v.speed=0;v.vx=0;v.vz=0;v.airborne=false;v.driver=null;v.engine=0;v.heat=0;v.primaryCd=v.secondaryCd=v.rocketCd=v.rocketReload=0;clearAirLock(v);
+    if(wreck){v.wreck=wreck;v.crushed=true;v._grounded=true;v.vy=0;this.scheduled.delete(v);if(this.a.colliders.has(v.obstacle))this.a.removeObs(v.obstacle);}
     // A wreck remains solid cover but never turns back into the old decorative car.
-    this.a.events.push({type:'vehicle-destroyed',vehicle:v.id,kind:v.kind,x:v.x,y:v.y+1,z:v.z,id:attacker?.id});
+    this.a.events.push({type:'vehicle-destroyed',vehicle:v.id,kind:v.kind,x:v.x,y:v.y+1,z:v.z,id:attacker?.id,...(wreck?{wreck}: {})});
     this.a.blast(v.x,v.y+1,v.z,v.kind==='tank'?5:3.5,65,attacker,'vehicle-wreck',v.obstacle);
   }
   crush(id,attacker) {
@@ -356,7 +428,7 @@ export class VehicleSystem {
     return true;
   }
   damageMounted(p,amount,attacker){if(!p.vehicle)return false;if(this.a._vehicleBlastDepth>0)return true;if(!attacker)return false;this.damage(p.vehicle,amount*.8,attacker);return true;}
-  snapshot(){return this.list.filter(v=>v.decor===undefined||v._changed||v.active).map(v=>({id:v.id,kind:v.kind,variant:v.variant,mods:{...v.mods},bombs:v.bombs||0,bombCd:v.bombCd||0,boostEnergy:v.boostEnergy??0,boosting:!!v.boosting,lockTarget:v.lockTarget||null,lockProgress:v.lockProgress||0,lockRange:v.lockRange||0,crushed:!!v.crushed,active:v.active,bodyW:v.bodyW,bodyH:v.bodyH,bodyD:v.bodyD,x:v.x,y:v.y,z:v.z,angle:v.angle,speed:v.speed,vx:v.vx||0,vy:v.vy||0,vz:v.vz||0,slip:v.slip||0,drifting:!!v.drifting,pitch:v.pitch,roll:v.roll,turret:v.turret,barrel:v.barrel,hp:v.hp,armour:armourSnapshot(v),driver:v.driver,fuel:v.fuel,ammo:v.ammo,mgAmmo:v.mgAmmo,rocketAmmo:v.rocketAmmo,rocketReserve:v.rocketReserve,rocketCd:v.rocketCd,rocketReload:v.rocketReload,rocketShot:v.rocketShot,rocketCursor:v.rocketCursor,rocketBurstLeft:v.rocketBurstLeft||0,heat:v.heat,overheated:v.overheated,primaryCd:v.primaryCd,wheelPhase:v.wheelPhase,steer:v.steer,engine:v.engine,airborne:v.airborne,shot:v.shot,mgShot:v.mgShot,repair:v.repair,decor:v.decor,model:v.model}));}
+  snapshot(){return this.list.filter(v=>v.decor===undefined||v._changed||v.active).map(v=>({id:v.id,kind:v.kind,variant:v.variant,mods:{...v.mods},bombs:v.bombs||0,bombCd:v.bombCd||0,boostEnergy:v.boostEnergy??0,boosting:!!v.boosting,lockTarget:v.lockTarget||null,lockProgress:v.lockProgress||0,lockRange:v.lockRange||0,crushed:!!v.crushed,active:v.active,bodyW:v.bodyW,bodyH:v.bodyH,bodyD:v.bodyD,x:v.x,y:v.y,z:v.z,angle:v.angle,speed:v.speed,vx:v.vx||0,vy:v.vy||0,vz:v.vz||0,slip:v.slip||0,drifting:!!v.drifting,pitch:v.pitch,roll:v.roll,stalled:!!v.stalled,wreck:v.wreck?{...v.wreck}:null,turret:v.turret,barrel:v.barrel,hp:v.hp,armour:armourSnapshot(v),driver:v.driver,fuel:v.fuel,ammo:v.ammo,mgAmmo:v.mgAmmo,rocketAmmo:v.rocketAmmo,rocketReserve:v.rocketReserve,rocketCd:v.rocketCd,rocketReload:v.rocketReload,rocketShot:v.rocketShot,rocketCursor:v.rocketCursor,rocketBurstLeft:v.rocketBurstLeft||0,heat:v.heat,overheated:v.overheated,primaryCd:v.primaryCd,wheelPhase:v.wheelPhase,steer:v.steer,engine:v.engine,airborne:v.airborne,shot:v.shot,mgShot:v.mgShot,repair:v.repair,decor:v.decor,model:v.model}));}
   shotSnapshot(){return this.rounds.map(({owner,team,...r})=>({...r}));}
   dispose(){this.a.world.removeCharacterController(this.controller);this.a.blast=this.nativeBlast;}
 }

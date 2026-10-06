@@ -1,4 +1,5 @@
 import { rayHulls, rayLeaf } from './architecture-geometry.js';
+import { rayAircraft } from './aircraft-geometry.js';
 import { rayBox } from './combat.js';
 import { cellRay } from './cells.js';
 import { terrainRay, terrainNormal, biomeAt } from './terrain.js';
@@ -10,6 +11,14 @@ export function castMap(origin, dir, range, map, ignore = null, solidOnly = fals
     if (b === ignore || (solidOnly && b.nocollide)) return distance;
     // Ignore all aliases of the querying vehicle, not only one obstacle object.
     if (ignore?.vehicleId !== undefined && (b.vehicleId === ignore.vehicleId || b.vehicleSpawn === ignore.vehicleId)) return distance;
+    if (b.aircraftShape) {
+      const hit = rayAircraft(b, origin, dir, distance);
+      if (hit && hit.distance < distance) {
+        distance = hit.distance;
+        impact = { kind: 'metal', x: hit.x, y: hit.y, z: hit.z, part: hit.part, obstacle: b };
+      }
+      return distance;
+    }
     // Accurate convex roof and oriented moving-door rays, including camera and prediction queries.
     if (b.roofShape || b.doorLeaf) {
       const hit = b.roofShape ? rayHulls(b.roofShape, origin, dir, distance) : rayLeaf(b.doorLeaf, origin, dir, distance);

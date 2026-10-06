@@ -1,3 +1,17 @@
+# Current continuation: PRIDA 0.42
+
+Read README.md, docs/UPDATE-0.42.md and docs/ANIMATIONS-0.42.md first.
+The current source is fully expanded in src/. The verified 0.41 cumulative
+payload was restored before adding FPV items, uploaded animation playback,
+aircraft collision/flight/wreckage and AEGIS takeoff and weapons.
+After editing release files: node scripts/build-update.mjs.
+Retained automated gates: npm run verify:release.
+See the update notes for historical test assumptions and the pending browser playtest.
+
+---
+
+The following handoff is historical context, preserved from the older release.
+
 # PRIDA — baseline for a new chat
 
 Paste this file into a new chat together with `PRIDA-baseline-full.zip` (the whole project including git history).

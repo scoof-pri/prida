@@ -1,4 +1,5 @@
 // Shared swept pedestrian/vehicle contact; Rapier remains the primary collision solver.
+import {sweepAircraft} from './aircraft-geometry.js';
 const SKIN=.025;
 function hitBox(origin,delta,half,ymin,ymax){
  let enter=-Infinity,exit=Infinity,axis=-1,sign=0;
@@ -26,7 +27,9 @@ export function sweepVehicleContacts(map,feet,requested,{radius=.34,height=1.68}
   if(Math.hypot(left.x,left.y,left.z)<1e-9)break;
   let best=null;
   const visit=o=>{
-   if(o.vehicleId===undefined||o.nocollide||!o.doorLeaf)return;
+   if(o.vehicleId===undefined||o.nocollide)return;
+   if(o.aircraftShape){const hit=sweepAircraft(o,pos,left,radius,height);if(hit&&(!best||hit.t<best.t))best=hit;return;}
+   if(!o.doorLeaf)return;
    const p=o.doorLeaf,c=Math.cos(p.yaw),s=Math.sin(p.yaw),dx=pos.x-p.x,dz=pos.z-p.z;
    const hit=hitBox([c*dx-s*dz,pos.y,s*dx+c*dz],[c*left.x-s*left.z,left.y,s*left.x+c*left.z],[p.w/2+radius,p.t/2+radius],p.y-p.h/2-height,p.y+p.h/2+SKIN);
    if(!hit||(best&&hit.t>=best.t))return;

@@ -5,6 +5,7 @@ import * as T from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { objectSurface } from './materials.js';
 import { rigBone } from './rig-pose.js';
+import { SUIT_RULES, suitRocketPort } from './suit-weapons.js';
 export function techPalette(){
   const shell=new T.MeshStandardMaterial({color:0x365967,metalness:.68,roughness:.36});
   const dark=new T.MeshStandardMaterial({color:0x182b35,metalness:.7,roughness:.48});
@@ -51,6 +52,29 @@ export function bombModel(){
   for(const z of [-.23,.21]){const ring=techMesh(root,new T.TorusGeometry(.161,.018,5,12),p.orange,0,0,z);}
   for(let k=0;k<4;k++){const fin=techMesh(root,box(.028,.40,.27),p.silver,0,0,-.38);fin.rotation.z=k*Math.PI/2;}
   return bakeTech(root);
+}
+export function suitRocketModel(){
+  const p=techPalette(),root=new T.Group();root.name='AEGIS micro rocket';
+  const hull=techMesh(root,new T.CylinderGeometry(.028,.028,.25,8),p.silver);hull.rotation.x=Math.PI/2;
+  const nose=techMesh(root,new T.ConeGeometry(.029,.085,8),p.orange,0,0,.168);nose.rotation.x=Math.PI/2;
+  for(let k=0;k<4;k++){const fin=techMesh(root,box(.006,.10,.075),p.dark,0,0,-.096);fin.rotation.z=k*Math.PI/2;}
+  const flame=techMesh(root,new T.ConeGeometry(.034,.24,8),p.glow,0,0,-.245);flame.rotation.x=-Math.PI/2;
+  root.userData.flame=flame;return bakeTech(root);
+}
+export function suitLauncherModel(side=1){
+  const p=techPalette(),root=new T.Group();root.name=side>0?'AEGISRocketRackR':'AEGISRocketRackL';
+  techMesh(root,box(.23,.23,.39),p.dark,0,0,.045);
+  techMesh(root,box(.245,.055,.24),p.shell,0,.13,.03);
+  const chambers=[];
+  for(let port=0;port<SUIT_RULES.rockets;port++){
+    const tube=suitRocketPort(port);if(tube.side!==side)continue;
+    const barrel=techMesh(root,new T.CylinderGeometry(.048,.048,.49,10),p.shell,-tube.right,tube.up,.075);barrel.rotation.x=Math.PI/2;
+    const bore=techMesh(root,new T.CylinderGeometry(.032,.032,.018,10),p.dark,-tube.right,tube.up,.326);bore.rotation.x=Math.PI/2;
+    const loaded=techMesh(root,new T.SphereGeometry(.023,8,6),p.orange,-tube.right,tube.up,.334);loaded.scale.z=.4;
+    root.remove(loaded);chambers.push({port,mesh:loaded});
+  }
+  bakeTech(root);for(const {mesh}of chambers)root.add(mesh);
+  root.userData.chambers=chambers;root.userData.suitSide=side;return root;
 }
 export function moduleModel(kind){
   if(kind==='fpv')return droneModel();
@@ -99,10 +123,21 @@ export function aegisDisplay(){
   const idle=a.clips.find(c=>c.name==='Idle');if(idle){a.mixer.clipAction(idle).play();a.mixer.update(0);}
   r.userData.customSuitDisplay041=true;return r;
 }
-export function attachAegis(body){return {items:[],dispose(){}};}
+export function attachAegis(body){
+  if(body.userData.avatarKind!=='suit')return {items:[],dispose(){}};
+  const items=[suitLauncherModel(1),suitLauncherModel(-1)];
+  for(const part of items){part.visible=false;body.add(part);}
+  return {items,dispose(){for(const part of items)disposeTech(part);}};
+}
 export function suitHands(){
   const asset=modelAsset('aegis-gauntlets');if(!asset)throw Error('Uploaded suit gauntlets not loaded');
-  const r=asset.scene.clone(true);r.traverse(o=>{if(o.isMesh)o.userData.sharedAvatar041=true;});return r;
+  const r=asset.scene.clone(true);r.traverse(o=>{if(o.isMesh)o.userData.sharedAvatar041=true;});
+  const mat=new T.MeshBasicMaterial({color:0x97eeff,toneMapped:false}),geo=new T.CylinderGeometry(.032,.032,.008,12);
+  for(const side of ['R','L']){
+    const hand=r.getObjectByName('Gauntlet'+side);if(!hand)continue;hand.position.x=(side==='R'?1:-1)*Math.abs(hand.position.x);
+    const emitter=techMesh(hand,geo,mat,0,.035,-.165);emitter.name='FP_AEGISPalm'+side;emitter.rotation.x=Math.PI/2;
+  }
+  return r;
 }
 export function vehicleModuleModel(v){
   const p=techPalette(),r=new T.Group();r.name='NOVA installed vehicle modules';

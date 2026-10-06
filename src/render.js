@@ -10,6 +10,7 @@ import { DetailDebris } from './detail-debris.js';
 import { syncRamRubble } from './vehicle-ram.js';
 import { syncConstructions } from './construction.js';
 import { syncDrones } from './drone-system.js';
+import { selectCharacterAnimation, applyCharacterAnimationPlayback, importedMelee } from './character-animations.js';
 import { TechnologyViews } from './technology-view.js';
 import { attachAegis, suitHands } from './technology-models.js';
 import { VehicleViews } from './vehicle-view.js';
@@ -1520,13 +1521,14 @@ export class View {
       v.landT = Math.max(0, v.landT - dt);
       // Fallen characters sink away after a few seconds; respawning resets them.
       v.dead = p.hp <= 0 ? v.dead + dt : 0;
-      v.body.position.y = v.dead > 3 ? -Math.min(1.8, (v.dead - 3) * 0.6) : 0;
+      const sinkDelay = Math.max(3, (v.actions.Death?.getClip().duration || 0) + 0.5);
+      v.body.position.y = v.dead > sinkDelay ? -Math.min(1.8, (v.dead - sinkDelay) * 0.6) : 0;
       const walking = p.moving > 0.5 && p.moving < 4.2;
       // Emotes: the equipped one plays for a few seconds, with its own bob, spin or robot steps on top.
       const emote = p.emote > 0 && p.hp > 0 ? COSMETICS.find((c) => c.id === look.emote) : null;
       v.emoteClock = emote ? v.emoteClock + dt : 0;
       const dance = emote?.dance;
-      v.body.position.y = v.dead > 3 ? v.body.position.y : dance?.bob ? Math.abs(Math.sin(v.emoteClock * (dance.speed || 5))) * dance.bob : 0;
+      v.body.position.y = v.dead > sinkDelay ? v.body.position.y : dance?.bob ? Math.abs(Math.sin(v.emoteClock * (dance.speed || 5))) * dance.bob : 0;
       // Locomotion (0.27): the legs go the way the body moves and the chest turns back to the aim; backwards the
       // gait runs in reverse; standing, the feet stay planted until the chest has turned too far, then step round.
       const upright = p.hp > 0 && !seat && !emote && !airborne && !p.dropping && !p.gliding && !p.inBus && !(p.healing > 0);
@@ -1586,6 +1588,8 @@ export class View {
         shooting = firearm && v.recoil > 0;
       let clipName = TOON_CLIPS[anim] || anim;
       if (shooting && (clipName === 'Idle' || clipName === 'Walk' || clipName === 'Run_Gun')) clipName = clipName === 'Idle' ? 'Idle_Shoot' : clipName === 'Walk' ? 'Walk_Shoot' : 'Run_Shoot';
+      const motion = selectCharacterAnimation(v, p, { base: anim, stance, firearm, shooting, airborne, walking, emote, dt });
+      if (motion) clipName = motion.name;
       this.animate(v, clipName);
       // Legs keep pace with the ground: each gait's clip runs at the speed it was made for (backwards: reversed).
       const clip = v.actions[v.animation],
@@ -1614,6 +1618,7 @@ export class View {
           this.fx.event({ type: 'step', x: p.x, y: p.y || 0, z: p.z });
         }
       }
+      applyCharacterAnimationPlayback(v, motion);
       restorePose(v);
       v.mixer.update(dt);
       savePose(v);
@@ -1622,10 +1627,10 @@ export class View {
       const pitch = p.lowReady ? 0 : p.id === id && !menu ? aim.pitch : p.pitch || 0;
       if (upright && v.legYaw) this.twistTorso(v, -v.legYaw);
       if (p.hp > 0 && !p.inBus && !emote) this.bendTorso(v, pitch, upright ? v.yaw : v.body.rotation.y);
-      this.poseBody(v, p, dt, { fists: !!weapon?.fists && upright && v.animation !== 'Punch' && v.animation !== 'HitReact' && !p.lowReady, drink: !!p.using && !weapon?.deploy && weapon?.model !== 'bandage' ? 1 - p.using.t / (p.using.time || 1) : -1 });
+      this.poseBody(v, p, dt, { fists: !!weapon?.fists && upright && !importedMelee(v.animation) && v.animation !== 'HitReact' && !p.lowReady, drink: !!p.using && !weapon?.deploy && weapon?.model !== 'bandage' ? 1 - p.using.t / (p.using.time || 1) : -1 });
       // The weapon or item in the right hand (the rig carries them all; only the one held shows). Nothing is held
       // while healing, dancing, gliding or falling out of the bus.
-      const busy = p.gear?.id==='aegis' || !!emote || (p.healing > 0 && !airborne) || p.gliding || (p.dropping && !p.gliding) || p.inBus,
+      const busy = (p.gear?.id==='aegis' && !weapon?.drone) || !!emote || (p.healing > 0 && !airborne) || p.gliding || (p.dropping && !p.gliding) || p.inBus,
         shown = busy ? null : characterGun(weapon);
       if (shown && !v.guns.some((g) => g.name === shown)) this.mountGun(v, weapon);
       for (const g of v.guns) g.visible = g.name === shown;
@@ -1641,7 +1646,7 @@ export class View {
       v.label.visible = p.hp > 0 && (menu || p.id !== id) && !(state.lobby && p.id === id) && !p.inBus;
       // Pulled in against a wall, the camera would sit inside your own head: then the body is not drawn.
       if (p.id === id && !menu && this.camNear < 0.75) v.root.visible = false;
-      if (v.dead > 6) v.root.visible = false;
+      if (v.dead > sinkDelay + 3) v.root.visible = false;
       v.bar.scale.x = (0.7 * p.hp) / 100;
       v.bar.position.x = -(0.7 - v.bar.scale.x) / 2;
       v.hp.quaternion.copy(this.camera.quaternion);
@@ -1698,7 +1703,7 @@ export class View {
     const drawWeapon = !menu && !this.thirdPerson && me && !me.vehicle && !me.droneId && me.hp > 0 && state.winner === null && !(me.flashback > 0) && !me.inBus;
     if (drawWeapon) {
       poseViewWeapon(this, me, aim, dt);
-      const suit = me.gear?.id === 'aegis';
+      const suit = me.gear?.id === 'aegis' && !WEAPONS[me.weapon]?.drone;
       this.fp.visible = !suit;
       if (this.fpAegisHands) this.fpAegisHands.visible = suit;
     } else { this.fp.visible = false; if (this.fpAegisHands) this.fpAegisHands.visible = false; }

@@ -27,7 +27,7 @@ import { COSMETICS, KINDS, itemsOfKind, pack as packCosmetics, freshProfile, rea
 import { roomCode, newRoomCode, inviteURL, validEndpoint } from './party.js';
 import { RARITIES, GEAR, ARMOR_TIERS } from './catalog.js';
 import { encodeLoadout, weaponStats, carryWeight } from './items.js';
-import { Mirror, Interpolator, Predictor } from './netcode.js';
+import { Mirror, Interpolator, Predictor, canPredictWalking } from './netcode.js';
 import { lobbySpot } from './lobby-stage.js';
 import { Minimap } from './minimap.js';
 import { DamageNumbers, feedLine } from './hud-fx.js';
@@ -37,7 +37,9 @@ import { BOSSES, RELICS, MOVE_LABELS } from './bosses.js';
 import { GRADE_FIELDS, GRADE_PRESETS, DEFAULT_GRADE, sanitizeGrade, startingGrade } from './grading.js';
 import { BUILD_KINDS, BUILD_MATERIALS } from './construction.js';
 import { DRONE_RULES } from './drone-system.js';
+import { fpvCount } from './fpv-inventory.js';
 import { SUIT_RULES } from './technology-system.js';
+import { suitControls } from './suit-controls.js';
 // Map colours for parks and wild biomes (inventory map and minimap).
 const ZONE_COLORS = {
   quarry: '#b6a180',
@@ -99,6 +101,8 @@ let inventoryOpen = false,
   buildMaterial040 = 0,
   droneToggle040 = false,
   suitToggle040 = false,
+  suitRocket042 = false,
+  dropItem042 = false,
   techUse040 = false,
   bomb040 = false,
   detonate = false,
@@ -240,7 +244,7 @@ function clearInput() {
   flyUp = false;
   flyDown = false;
   interact = false; liftFloor033 = undefined;
-  buildMode040 = false; droneToggle040 = suitToggle040 = techUse040 = bomb040 = false;
+  buildMode040 = false; droneToggle040 = suitToggle040 = suitRocket042 = dropItem042 = techUse040 = bomb040 = false;
   detonate = false;
   heal = false;
   emote = false;
@@ -686,7 +690,7 @@ function connectGroup(create = false, queue = null) {
         lastSt = msg.state.st || 0;
         interp.push(msg.state);
         const mine = msg.state.players.find((p) => p.id === id);
-        if (mine?.vehicle) predictor.idle(mine);
+        if (!canPredictWalking(mine) || !view?.map) predictor.idle(mine);
         else if (mine && view?.map) predictor.server(mine, msg.self?.ack, view.map, predictCtx(mine));
         state = msg.state;
         // The group only comes when it changes.
@@ -893,7 +897,10 @@ window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyQ' && !e.repeat) { buildMaterial040 = (buildMaterial040 + 1) % BUILD_MATERIALS.length; return; }
   }
   keys.add(e.code);
-  if (e.code === 'KeyR' && !buildMode040) reload = true;
+  if (e.code === 'KeyR' && !buildMode040 && !e.repeat) {
+    requestReloadOrSuitRocket();
+  }
+  if (e.code === 'Backspace' && !e.repeat) { e.preventDefault(); dropItem042 = true; }
   if (e.code === 'KeyE' && !e.repeat) requestUse033();
   if (e.code === 'KeyH' && !e.repeat) heal = true;
   if (e.code === 'KeyB' && !e.repeat) { if (me()?.vehicle) bomb040 = true; else emote = true; }
@@ -1067,9 +1074,14 @@ const abilityTouch = [false, false];
   });
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) $(sel).addEventListener(name, () => (abilityTouch[k] = false));
 });
-$('#touchReload').onclick = () => (reload = true);
+function requestReloadOrSuitRocket() {
+  const p = me(), controls = suitControls(p, { slot });
+  if (controls.suitWeapons) suitRocket042 = true;
+  else if (p?.vehicle || (!p?.droneId && !controls.drone)) reload = true;
+}
+$('#touchReload').onclick = requestReloadOrSuitRocket;
 $('#interactBtn').onclick = requestUse033;
-$('#emoteBtn').onclick = () => (emote = true);
+$('#emoteBtn').onclick = () => { if (me()?.droneId) droneToggle040 = true; else emote = true; };
 $('#dashBtn').onclick = () => (dash = true);
 $('#aimBtn').onclick = () => (holdingCharge() ? (detonate = true) : (aiming = !aiming));
 $('#inventoryBtn').onclick = () => toggleInventory(true);
@@ -1077,6 +1089,10 @@ $('#closeInventory').onclick = () => toggleInventory(false);
 $('#healBtn').onclick = () => {
   toggleInventory(false);
   heal = true;
+};
+$('#dropItemBtn042').onclick = () => {
+  toggleInventory(false);
+  dropItem042 = true;
 };
 $('#jumpBtn').addEventListener('pointerdown', (e) => {
   e.preventDefault();
@@ -1119,10 +1135,13 @@ function input() {
     -move.z + (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
   const world = relativeMove(right, forward, angle),
     // Third person: fire from the eye at what the crosshair is on, not parallel to the camera (render.js, aim.js).
-    fix = player?.vehicle || player?.droneId || player?.gear?.id === 'aegis' ? null : view?.aimFix,
+    fix = player?.vehicle || player?.droneId ? null : view?.aimFix,
     active = canLook(), pressedFire = active && (touch ? fireTouch : mouse.down),
     turbo = !!ride && ride.kind === 'tank' && ride.mods?.turbo,
-    suit = player?.gear?.id === 'aegis' && !player?.vehicle && !player?.droneId;
+    up = flyUp || keys.has('Space'),
+    down = flyDown || keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight'),
+    controls = suitControls(player, { slot, up, down }),
+    suit = controls.suit;
   return {
     liftFloor: active ? liftFloor033 : undefined,
     x: active ? world.x : 0,
@@ -1137,8 +1156,10 @@ function input() {
     buildMaterial: buildMaterial040,
     droneToggle: active && droneToggle040,
     suitToggle: false,
-    suitThrust: active && suit && (keys.has('Space') || flyUp),
-    suitAlt: active && suit && aiming,
+    suitThrust: active && controls.thrust,
+    suitAlt: active && controls.suitWeapons && aiming,
+    suitRocket: active && controls.suitWeapons && suitRocket042,
+    dropItem: active && dropItem042,
     techUse: active && techUse040,
     bomb: active && bomb040,
     turretAngle: view?.vehicleGunAim && view.vehicleGunAim.id === player?.vehicle ? view.vehicleGunAim.angle : angle,
@@ -1152,8 +1173,7 @@ function input() {
     reload: !paused && reload,
     jump: active && jump && !turbo,
     ascend: active
-      ? (flyUp || vehicleTouch.up || keys.has('Space') ? 1 : 0) -
-        (flyDown || vehicleTouch.down || keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight') ? 1 : 0)
+      ? (up || vehicleTouch.up ? 1 : 0) - (down || vehicleTouch.down ? 1 : 0)
       : 0,
     interact: active && interact,
     detonate: active && detonate,
@@ -1166,7 +1186,7 @@ function input() {
     slot,
   };
 }
-function resetTechOneShots040() { droneToggle040 = suitToggle040 = techUse040 = bomb040 = false; }
+function resetTechOneShots040() { droneToggle040 = suitToggle040 = suitRocket042 = dropItem042 = techUse040 = bomb040 = false; }
 function handleEvent(e) {
   if (e.type === 'lift-arrived' && me() && Math.hypot(e.x-me().x,e.z-me().z)<9 && Math.abs(e.y-me().y)<3)
     tones([660,880],{type:'sine',vol:.025,dur:.07,gap:.06});
@@ -1176,7 +1196,8 @@ function handleEvent(e) {
   if (e.id === id && e.type === 'tech-note') toast(e.text || 'NOVA TECH', '#79e9df');
   if (e.id === id && e.type === 'tech-pickup') toast('NOVA EQUIPMENT ACQUIRED', '#79e9df');
   if (e.id === id && e.type === 'build-placed') tones([220,330], {type:'triangle',vol:.018,dur:.05,gap:.025});
-  if (e.id === id && e.type === 'drone-launch') toast('FPV LINK ACTIVE · LMB DETONATE · N RETURN', '#75e5dc');
+  if (e.id === id && e.type === 'drone-launch') toast('FPV LINK ACTIVE · LMB DETONATE · N END LINK', '#75e5dc');
+  if (e.id === id && e.type === 'item-drop') { slot = me()?.slot || 0; toast(WEAPONS[e.item]?.name + ' DROPPED'); }
   if (e.id === id && e.type === 'drone-end') toast(e.exploded ? 'FPV DETONATED' : 'FPV LINK ENDED', '#75e5dc');
   if (e.id === id && e.type === 'bomb-release') toast('BOMB RELEASED', '#f0b46d');
   if (e.type === 'door-blocked' && e.id === id) toast('DOOR BLOCKED', '#ffd39c');
@@ -1385,20 +1406,27 @@ function updateTechHud040(p) {
   show('#droneHud040', !!drone);
   if (drone) $('#droneStat040').textContent = `BAT ${Math.ceil(drone.battery)} S · SIG ${Math.round((drone.signal||0)*100)}% · HP ${Math.max(0,Math.ceil(drone.hp))}`;
   const carry=[];
-  if(p.fpvCharges) carry.push(`FPV ×${p.fpvCharges}`);
+  const carriedFPV = fpvCount(p);
+  if(carriedFPV) carry.push(`FPV ×${carriedFPV} · INVENTORY ITEM`);
+  $('#emoteBtn small').textContent = drone ? 'END LINK' : 'EMOTE';
+  $('#emoteBtn').setAttribute('aria-label', drone ? 'End FPV link' : 'Emote');
   for(const m of p.techModules||[]) carry.push(m.toUpperCase());
   if(ride?.mods) for(const m of ['ram','turbo','bomb']) if(ride.mods[m]) carry.push(`${m.toUpperCase()} INSTALLED`);
   show('#techCarry040', carry.length>0 && !build && !drone);
   if(carry.length) $('#techCarry040').textContent = carry.join(' · ') + (p.techModules?.length && p.vehicle ? ' · U INSTALL' : '');
-  const aegis=p.gear?.id==='aegis'&&p.hp>0&&!p.vehicle&&!p.droneId;
+  const controls=suitControls(p, { slot }), aegis=controls.suit;
   show('#aegisHud040', aegis);
   if(aegis){
     const energy=Math.max(0,Math.min(100,p.gear?.fuel??0)), ground=view?.map ? Math.max(0,p.y-(view.map ? (view.map._height040?.(p.x,p.z) ?? 0) : 0)) : p.y;
     $('#aegisEnergy040').textContent=Math.round(energy)+'%';$('#aegisEnergyBar040').style.width=energy+'%';
-    $('#aegisMode040').textContent=p.suitFlight?(p.sprinting?'BOOST FLIGHT':'FLIGHT'):'GROUND MODE';
+    $('#aegisMode040').textContent=p.suitTakeoff>0?'TAKING OFF':p.suitFlight?(p.suitBoost?'BOOST FLIGHT':'FLIGHT'):'GROUND MODE';
     $('#aegisAlt040').textContent=`ALT ${Math.max(0,Math.round(p.y))} · SPD ${Math.round(Math.hypot(p.suitVX||0,p.suitVZ||0)*3.6)} KM/H`;
-    $('#aegisBeam040').textContent=p.suitBeamCd>0?`BEAM COOL ${p.suitBeamCd.toFixed(1)} S`:`RMB BEAM ${Math.round((p.suitCharge||0)*100)}% · HOLD SPACE TO FLY`;
+    $('#aegisBeam040').textContent=!controls.suitWeapons?'STOW FPV TO USE SUIT WEAPONS':p.suitBeamCd>0?`BEAM COOL ${p.suitBeamCd.toFixed(1)} S`:`${touch?'AIM':'RMB'} BEAM ${Math.round((p.suitCharge||0)*100)}% · HOLD ${touch?'UP':'SPACE'} TO FLY`;
+    $('#aegisRockets042').textContent=`${controls.suitWeapons?(touch?'ROCKET':'R · ROCKET'):'ROCKETS STOWED'} ${p.suitRockets??p.gear.rocketAmmo??6} / 6${p.suitRocketCd>0?' · '+p.suitRocketCd.toFixed(1)+' S':''}`;
   }
+  show('#touchReload', !p.droneId && (!controls.drone || !!ride));
+  $('#touchReload').textContent = controls.suitWeapons ? 'R' : '↻';
+  $('#touchReload').setAttribute('aria-label', controls.suitWeapons ? 'Fire suit rocket' : ride ? 'Service vehicle' : 'Reload');
   if (ride?.kind==='plane'&&ride.mods?.bomb) $('#reloadText').textContent=`BOMB ${ride.bombs||0} · B RELEASE`;
   if (ride?.kind==='tank'&&ride.mods?.turbo) $('#reloadText').textContent=`TURBO ${Math.round(ride.boostEnergy||0)}% · HOLD SPACE`;
 }
@@ -1436,6 +1464,8 @@ function hud(dt) {
       ? `RELOAD ${p.reload.toFixed(1)}`
       : w.spinup && p.spin > 0 && p.spin < 1
         ? 'SPINNING UP'
+        : w.drone
+          ? `${touch ? 'FIRE' : 'LMB'} · LAUNCH DRONE · N END LINK`
         : w.consumable
           ? p.using
             ? `USING · ${p.using.t.toFixed(1)} s`
@@ -1497,8 +1527,8 @@ function hud(dt) {
   }
   show('#cheatBadge', !!state.cheated);
   extrasHud(p, dt);
-  show('#flyDown', !!p.cheats?.flight);
-  if (p.cheats?.infinite && !w.melee) {
+  show('#flyDown', !!p.cheats?.flight || !!p.droneId || p.gear?.id === 'aegis');
+  if (p.cheats?.infinite && !w.melee && !w.drone) {
     $('#ammo').textContent = '∞';
     $('#maxAmmo').textContent = ' / ∞';
   }
@@ -1709,8 +1739,9 @@ function updateInventoryHUD(p) {
       : 'Paused. Equipment lasts until the match ends.';
   const gear = p.gear && GEAR.find((g) => g.id === p.gear.id);
   $('#supplyText').textContent =
-    `Medkits: ${p.medkits} / 5 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'} · Build: W${p.materials?.wood||0}/B${p.materials?.stone||0}/S${p.materials?.metal||0} · FPV ${p.fpvCharges||0} · Modules ${(p.techModules||[]).join(', ')||'none'}`;
+    `Medkits: ${p.medkits} / 5 · Armor: ${p.armor} / 100 · Gear: ${gear ? gear.name : 'none'} · Build: W${p.materials?.wood||0}/B${p.materials?.stone||0}/S${p.materials?.metal||0} · FPV ${fpvCount(p)} · Modules ${(p.techModules||[]).join(', ')||'none'}`;
   $('#healBtn').disabled = p.medkits === 0 || p.hp >= 100;
+  $('#dropItemBtn042').disabled = !p.slots?.[p.slot] || WEAPONS[p.slots[p.slot].w]?.fists || !!p.vehicle || !!p.droneId;
   const key = JSON.stringify([p.slots, p.slot, p.relic?.id]);
   if (key !== inventoryKey) {
     inventoryKey = key;
@@ -1814,7 +1845,7 @@ function predicted(dt) {
   if (mode !== 'online') return state;
   const shown = interp.apply(state, id),
     me = state.players.find((p) => p.id === id);
-  if (!me || me.hp <= 0 || me.escalator || me.lift || me.vehicle || me.inBus || me.dropping || me.gliding || me.launched || me.push || me.frozen > 0 || me.cheats?.flight || !view?.map) {
+  if (!canPredictWalking(me) || !view?.map) {
     predictor.idle(me);
     return shown;
   }

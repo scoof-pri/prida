@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-crazygames/
+release/
+data/
+.prida-*/
+.bundle-check/
+.portal-*-check/
+shots/
+*.log
+.env
+.env.*
+!.env.example

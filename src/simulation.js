@@ -1,4 +1,6 @@
 import { ConstructionSystem, freshMaterials } from './construction.js';
+import { aircraftColliderParts, aircraftClosestPoint } from './aircraft-geometry.js';
+import { fpvCount, receiveFPV } from './fpv-inventory.js';
 import { DroneSystem } from './drone-system.js';
 import { TechnologySystem, suitMovement } from './technology-system.js';
 import { BotDecisionBudget } from './bot-budget.js';
@@ -191,6 +193,15 @@ export class Arena {
     // Small furniture only stops bullets; pre-cut slabs (stairwells) collide cell by cell.
     // Window glass stops people (not bullets' sight lines) until it shatters.
     if (o.nocollide && o.part !== 'glass') return this.colliders.set(o, null);
+    if (o.aircraftShape) {
+      const colliders = aircraftColliderParts(o).map(part => {
+        const shape = part.vertices ? RAPIER.ColliderDesc.convexHull(new Float32Array(part.vertices))
+          : RAPIER.ColliderDesc.cuboid(part.half.x, part.half.y, part.half.z);
+        if (!shape) throw Error('Invalid aircraft collision part: ' + part.id);
+        return this.world.createCollider(shape.setTranslation(part.x, part.y, part.z).setRotation(part.rotation));
+      });
+      return this.colliders.set(o, colliders);
+    }
     if (o.roofShape) {
       const colliders = o.roofShape.map(shape => {
         const desc = RAPIER.ColliderDesc.convexHull(new Float32Array(shape.vertices));
@@ -583,8 +594,8 @@ export class Arena {
   }
   spawn(p) {
     this.drones?.cancel(p);
-    p.materials=freshMaterials();p.fpvCharges=0;p.techModules=[];p.droneId=null;
-    p.suitFlight=false;p.suitVX=p.suitVZ=p.suitCharge=p.suitBeamCd=0;
+    p.materials=freshMaterials();p.techModules=[];p.droneId=null;
+    p.suitFlight=false;p.suitVX=p.suitVZ=p.suitCharge=p.suitBeamCd=p.suitTilt=p.suitSpool=p.suitTakeoff=p.suitRocketCd=0;p.suitBoost=false;p.suitRockets=0;p.dropItemHeld=false;
     if (p.vehicle) this.vehicles?.exit(p, { force: true, quiet: true });
     let best = this.map.spawns[0],
       distance = -Infinity;
@@ -677,7 +688,7 @@ export class Arena {
       vehicleRocket: i.vehicleRocket === true,
       buildMode:i.buildMode===true,buildPlace:i.buildPlace===true,
       buildType:Math.floor(clamp(i.buildType,0,3)),buildRotation:Math.floor(clamp(i.buildRotation,0,3)),buildMaterial:Math.floor(clamp(i.buildMaterial,0,2)),
-      droneToggle:once('droneToggle'),suitToggle:once('suitToggle'),techUse:once('techUse'),bomb:once('bomb'),
+      droneToggle:once('droneToggle'),suitToggle:once('suitToggle'),suitRocket:once('suitRocket'),dropItem:once('dropItem'),techUse:once('techUse'),bomb:once('bomb'),
       suitThrust:i.suitThrust===true,suitAlt:i.suitAlt===true,vehicleBoost:i.vehicleBoost===true,
       vehicleBrake: i.vehicleBrake === true,
       x: clamp(i.x, -1, 1),
@@ -732,6 +743,10 @@ export class Arena {
     if (Number.isInteger(what.weapon) && WEAPONS[what.weapon]) {
       const item = makeItem(what.weapon, Math.max(0, Math.min(MAX_RARITY, what.rarity ?? 0)));
       if (WEAPONS[what.weapon].melee) p.slots[0] = item;
+      else if (WEAPONS[what.weapon].drone) {
+        const result = receiveFPV(p, item);
+        if (result.dropped) this.dropLoot(p.x, p.z, { loot: result.dropped }, p.id);
+      }
       else addItem(p, item);
       this.syncHeld(p);
       p.reload = 0;
@@ -740,7 +755,7 @@ export class Arena {
     if (what.medkits) p.medkits = Math.min(5, p.medkits + what.medkits);
     if (what.armor) p.armor = Math.min(100, p.armor + what.armor);
     if (what.heal) p.hp = 100;
-    if (what.drones) p.fpvCharges=5;
+    if (what.drones) { while (fpvCount(p) < 5) { const result = receiveFPV(p); if (result.slot < 0) break; if (result.dropped) this.dropLoot(p.x, p.z, {loot: result.dropped}, p.id); } this.syncHeld(p); }
     if (what.materials) p.materials={wood:500,stone:500,metal:500};
     if (what.modules) p.techModules=['ram','turbo','bomb'];
     if (what.ammo) restockAmmo(p, 1);
@@ -1246,7 +1261,7 @@ export class Arena {
         continue;
       }
       let item = this.held(p);
-      if (p.cheats.infinite && item && !WEAPONS[item.w].melee) {
+      if (p.cheats.infinite && item && !WEAPONS[item.w].melee && !WEAPONS[item.w].drone) {
         item.ammo = weaponStats(item.w, item.r).mag;
         item.reserve = WEAPONS[item.w].reserve;
         p.reload = 0;
@@ -1265,7 +1280,7 @@ export class Arena {
               reload: false,
               jump: false,
               ascend: 0,
-              suitThrust: false, suitAlt: false, suitToggle: false,
+              suitThrust: false, suitAlt: false, suitToggle: false, suitRocket: false, dropItem: false,
               sprint: false,
               interact: false,
               heal: false,
@@ -1279,6 +1294,8 @@ export class Arena {
         p.abilityHeld[k] = pressed;
       }
       if (i.slot !== undefined) this.equip(p, i.slot);
+      if (i.dropItem && !p.dropItemHeld) this.dropHeld(p);
+      p.dropItemHeld = !!i.dropItem;
       item = this.held(p);
       const w = WEAPONS[p.weapon],
         stats = weaponStats(p.weapon, p.rarity);
@@ -1294,7 +1311,7 @@ export class Arena {
       if (p.droneId) i={...i,x:0,z:0,fire:false,jump:false,ascend:0,interact:false,heal:false,buildMode:false,buildPlace:false,suitToggle:false,suitAlt:false};
       this.technology.playerStep(p,i,dt);
       this.construction.useInput(p,i);
-      if(i.buildMode||p.gear?.id==='aegis')i={...i,fire:false,reload:false};
+      if(i.buildMode||(p.gear?.id==='aegis'&&!w.drone))i={...i,fire:false,reload:false};
       if (Number.isInteger(i.liftFloor) && i.liftFloor !== p.liftChoiceHeld) this.lifts.use(p,i.liftFloor);
       p.liftChoiceHeld = i.liftFloor;
       if (i.interact && !p.interactHeld) {
@@ -1437,6 +1454,12 @@ export class Arena {
         (c) => !c.parent(),
       );
       const m = sweepVehicleContacts(this.map, p, this.controller.computedMovement());
+      if (wingMove038 && p.gear?.id === 'aegis') {
+        // Contact cancels velocity into a wall; it must not build up behind the
+        // controller and suddenly propel the suit when the obstruction ends.
+        if (Math.abs(m.x - conveyor034.x - (wingMove038.x + push.x) * dt) > .002) p.suitVX = 0;
+        if (Math.abs(m.z - conveyor034.z - (wingMove038.z + push.z) * dt) > .002) p.suitVZ = 0;
+      }
       p.x = clamp(p.x + m.x, -this.map.limit.x + 0.4, this.map.limit.x - 0.4);
       p.z = clamp(p.z + m.z, -this.map.limit.z + 0.4, this.map.limit.z - 0.4);
       p.y = clamp(p.y + m.y, -32, p.cheats.flight && !p.dropping ? 32 : 145);
@@ -1451,8 +1474,16 @@ export class Arena {
       p.detonateHeld = !!i.detonate;
       // Items: a press of the fire button starts using the one in your hands.
       // Holding the button through a weapon switch still counts; after one use, let go before the next.
-      if (!i.fire) p.useArmed = true;
+      if (!p.droneId && !i.fire) p.useArmed = true;
       if (w.consumable) {
+        if (w.drone) {
+          if (i.fire && p.useArmed !== false && p.cooldown === 0 && !p.healing) {
+            this.drones.launch(p, { selectedOnly: true });
+            p.useArmed = false;
+          }
+          p.fireHeld = !!i.fire;
+          continue;
+        }
         if (i.fire && p.useArmed !== false && !p.using && p.cooldown === 0 && !p.healing && item?.ammo > 0) {
           const blocked = this.useBlocked(p, w);
           if (!blocked) {
@@ -1736,6 +1767,21 @@ export class Arena {
       p.cooldown = Math.max(p.cooldown, 0.25);
     }
   }
+  dropHeld(p) {
+    if (!p || p.hp <= 0 || p.inBus || p.vehicle || p.droneId || p.frozen > 0) return false;
+    const item = this.held(p);
+    if (!item || WEAPONS[item.w]?.fists) return false;
+    const origin = { x: p.x, y: p.y + 0.65, z: p.z }, dir = direction(p.angle);
+    const length = Math.max(0, Math.min(0.8, castMap(origin, dir, 0.9, this.map).distance - 0.12));
+    const dropped = this.dropLoot(p.x + dir.x * length, p.z + dir.z * length, { loot: { ...item } }, p.id);
+    // Keep loot on the floor the player occupies, including roofs and lifted platforms.
+    dropped.y = p.y;
+    p.slots[p.slot] = p.slot === 0 ? makeItem(FISTS) : null;
+    p.slot = 0; p.reload = 0; p.using = null; p.cooldown = Math.max(p.cooldown, 0.25);
+    this.syncHeld(p);
+    this.events.push({ type: 'item-drop', id: p.id, item: item.w, x: dropped.x, y: dropped.y, z: dropped.z });
+    return true;
+  }
   // Pre-match loadout (validated). Also accepts a legacy weapon index for the primary slot.
   setLoadout(p, loadout = null) {
     if (Number.isInteger(loadout)) loadout = { ...p.loadout, primary: loadout };
@@ -1766,7 +1812,8 @@ export class Arena {
       medkits: contents.medkits || 0,
       armor: contents.armor || 0,
       plate: contents.plate || null,
-      gear: contents.gear || null,
+      gear: (typeof contents.gear === 'object' ? contents.gear?.id : contents.gear) || null,
+      gearState: contents.gear && typeof contents.gear === 'object' ? { ...contents.gear } : null,
       opened: false,
       by,
     };
@@ -1790,6 +1837,18 @@ export class Arena {
       )
       .sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
     if (!c) return false;
+    // An FPV drop can be taken in part. The world keeps the exact remainder;
+    // every acquisition path shares the same five-drone inventory limit.
+    let fpvResult = null;
+    if (c.loot && WEAPONS[c.loot.w]?.drone) {
+      const found = makeItem(c.loot.w, c.loot.r);
+      if (c.ammo !== undefined) found.ammo = c.ammo;
+      fpvResult = receiveFPV(p, found);
+      if (fpvResult.slot < 0) {
+        if (fpvResult.full) this.events.push({ type: 'tech-note', id: p.id, text: 'DRONE INVENTORY FULL (5)' });
+        return false;
+      }
+    }
     c.opened = true;
     c.openedAt = this.tick;
     let result = { slot: -1, dropped: null };
@@ -1800,7 +1859,8 @@ export class Arena {
       // Bots with a full inventory only swap for something rarer than what they would drop.
       const full = !WEAPONS[item.w].melee && p.slots.slice(1).every(Boolean) && !p.slots.some((x) => x?.w === item.w),
         swapped = p.slots[p.slot > 0 ? p.slot : 1];
-      if (!(p.bot && full && swapped && item.r <= swapped.r)) result = addItem(p, item);
+      if (fpvResult) result = fpvResult;
+      else if (!(p.bot && full && swapped && item.r <= swapped.r)) result = addItem(p, item);
       if (result.slot === p.slot || !this.held(p)) p.reload = 0;
       this.syncHeld(p);
     }
@@ -1817,14 +1877,14 @@ export class Arena {
         extraTaken = true;
       } else this.dropLoot(c.x + Math.sin(p.angle + 2) * 0.9, c.z + Math.cos(p.angle + 2) * 0.9, { loot: ex }, null);
     }
-    restockAmmo(p);
+    if (!c.suppliesTaken042) restockAmmo(p);
     p.medkits = Math.min(5, p.medkits + (c.medkits || 0));
     p.armor = Math.min(100, p.armor + (c.armor || 0));
     if (c.plate) wearArmor(p, c.plate);
     let oldGear = null;
     if (c.gear && p.gear?.id !== c.gear) {
-      oldGear = p.gear?.id || null;
-      p.gear = makeGear(c.gear);
+      oldGear = p.gear ? { ...p.gear } : null;
+      p.gear = makeGear(c.gearState || c.gear);
     }
     if (result.dropped || oldGear)
       this.dropLoot(
@@ -1848,6 +1908,13 @@ export class Arena {
       z: c.z,
       tier: c.tier || c.kind,
     });
+    if (fpvResult?.remaining > 0) {
+      c.ammo = fpvResult.remaining; c.opened = false; delete c.openedAt;
+      // Extra supplies in a death drop are collected only once, even when its
+      // FPV stack takes more than one visit to carry away.
+      c.extra = null; c.medkits = c.armor = 0; c.plate = c.gear = c.gearState = null;
+      c.suppliesTaken042 = true;
+    }
     return true;
   }
   damage(attacker, victim, amount, byBoss = null) {
@@ -1917,7 +1984,7 @@ export class Arena {
             medkits: victim.medkits > 0 ? 1 : 0,
             armor: 0,
             plate: victim.armorTier,
-            gear: victim.gear?.id || null,
+            gear: victim.gear ? { ...victim.gear } : null,
           });
         items.forEach((it, k) => {
           const a = victim.angle + ((k + 1) / (items.length + 1)) * Math.PI * 2;
@@ -1949,7 +2016,7 @@ export class Arena {
       carve = radius * 0.5;
     this.map.obstacles.grid.query(x - radius, z - radius, x + radius, z + radius, (o) => {
       if (o === source) return;
-      const d = boxDistance(o, x, y, z);
+      const d = o.aircraftShape ? aircraftClosestPoint(o, { x, y, z }).distance : boxDistance(o, x, y, z);
       if (d >= radius) return;
       const b = o.building !== undefined ? this.map.buildings[o.building] : null;
       if (b && !b.collapsed && ['upper', 'roof', 'wall', 'lintel'].includes(o.part)) {
@@ -2389,7 +2456,7 @@ export class Arena {
       ...this.bosses.snapshot(),
       bus: this.bus ? { ...this.bus } : null,
       // Input bookkeeping (held keys, the bots' brains) stays on the server: only what clients draw goes out.
-      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, perks, skills, dashHeld, detonateHeld, interactHeld, healHeld, emoteHeld, abilityHeld, relicSwapHeld, fireHeld, useArmed, padCd, ack, inputSeq, interp, _buildNotice040, ...p }) => ({
+      players: this.players.map(({ input, brain, inputAge, vy, jumpHeld, sprintLocked, botInput, lag, perks, skills, dashHeld, detonateHeld, interactHeld, healHeld, emoteHeld, abilityHeld, relicSwapHeld, fireHeld, useArmed, dropItemHeld, padCd, ack, inputSeq, interp, _buildNotice040, ...p }) => ({
         ...p,
         // Only what the client draws: whether DASH is unlocked and how long it has left.
         dashCd: perks?.dash ? Math.round(p.dashCd * 10) / 10 : undefined,

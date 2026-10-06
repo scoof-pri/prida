@@ -7,6 +7,7 @@ import * as T from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { objectSurface } from './materials.js';
 import { wedgeData } from './vehicle-geometry.js';
+import { AIRCRAFT_GUNS } from './aircraft-geometry.js';
 const assets=new Map();
 export const VEHICLE_ASSET_STATUS={tank:'not loaded',plane:'not loaded'};
 export async function loadVehicleModels() {
@@ -103,7 +104,6 @@ function planeModel() {
     const tail=mesh(root,wedge(1.6,.14,.80,.9),paint,side*.92,1.35,-2.77);
     const wheel=mesh(root,new T.CylinderGeometry(.31,.31,.19,12),dark,side*.9,.33,.82);wheel.rotation.z=Math.PI/2;rig.wheels.push(wheel);
     mesh(root,box(.075,.72,.075),steel,side*.9,.72,.82);
-    const cannon=mesh(root,new T.CylinderGeometry(.034,.046,.73,8),dark,side*1.4,1.24,1.05);cannon.rotation.x=Math.PI/2;
   }
   for(const side of [-1,1]){
     for(let k=0;k<5;k++){const port=mesh(root,new T.CylinderGeometry(.07,.08,.17,6),steel,side*.48,1.23,1.1+k*.24);port.rotation.z=Math.PI/2;}
@@ -118,6 +118,16 @@ function planeModel() {
   for(const a of [0,Math.PI/2]){const blade=mesh(prop,box(2.5,.095,.09),dark);blade.rotation.z=a;}
   const tailWheel=mesh(root,new T.CylinderGeometry(.15,.15,.10,10),dark,0,.18,-2.78);tailWheel.rotation.z=Math.PI/2;rig.wheels.push(tailWheel);
   root.userData.rig=rig;return mergeRigid(root,rig);
+}
+function armAircraft(root){
+  const guns=new T.Group();guns.name='aircraft-wing-guns';root.add(guns);root.userData.aircraftGuns=guns;
+  const steel=mat(0x465558,.43,.72),dark=mat(0x101b1e,.56,.3);
+  for(const side of [-1,1])for(const cannon of [true,false]){
+    const muzzle=cannon?{...AIRCRAFT_GUNS.cannon,x:side*AIRCRAFT_GUNS.cannon.x}:side<0?AIRCRAFT_GUNS.left:AIRCRAFT_GUNS.right;
+    const barrel=mesh(guns,new T.CylinderGeometry(cannon?.054:.031,cannon?.078:.045,.78,10),steel,muzzle.x,muzzle.y,muzzle.z-.39);barrel.rotation.x=Math.PI/2;
+    const opening=mesh(guns,new T.CylinderGeometry(cannon?.042:.024,cannon?.042:.024,.035,8),dark,muzzle.x,muzzle.y,muzzle.z-.004);opening.rotation.x=Math.PI/2;
+  }
+  return root;
 }
 export function fallbackCar() {
   const root=new T.Group(),paint=mat(0x758a97,.32,.42),dark=mat(0x202e34,.18,.4),rubber=mat(0x172020,.85,0),rig={wheels:[],owned:true};
@@ -156,9 +166,9 @@ export function vehicleModel(kind,nativeCar=null,state={kind}) {
     // Fit into the authoritative envelope without changing the mesh hierarchy/pivots.
     const bounds=new T.Box3().setFromObject(root),size=bounds.getSize(new T.Vector3()),centre=bounds.getCenter(new T.Vector3());
     const target=kind==='plane'?{w:9.4,d:8.8}:{w:3.2,d:7.5},scale=Math.min(target.w/Math.max(.01,size.x),target.d/Math.max(.01,size.z));
-    const wrapper=new T.Group();root.scale.multiplyScalar(scale);root.position.add(new T.Vector3(-centre.x*scale,-bounds.min.y*scale,-centre.z*scale));wrapper.add(root);wrapper.userData.rig=root.userData.rig;return wrapper;
+    const wrapper=new T.Group();root.scale.multiplyScalar(scale);root.position.add(new T.Vector3(-centre.x*scale,-bounds.min.y*scale,-centre.z*scale));wrapper.add(root);wrapper.userData.rig=root.userData.rig;return kind==='plane'?armAircraft(wrapper):wrapper;
   }
-  return kind==='tank'?tankModel():planeModel();
+  return kind==='tank'?tankModel():armAircraft(planeModel());
 }
 export function animateVehicle(root,v,dt) {
   const r=root.userData.rig||{};
@@ -179,6 +189,7 @@ export function animateVehicle(root,v,dt) {
 }
 export function disposeVehicleModel(root) {
   const rig=root?.userData.rig;rig?.mixer?.stopAllAction();if(rig?.mixer&&rig.animationRoot)rig.mixer.uncacheRoot(rig.animationRoot);
+  const guns=root?.userData.aircraftGuns;if(guns){const geos=new Set(),mats=new Set();guns.traverse(o=>{if(o.isMesh){geos.add(o.geometry);for(const m of [o.material].flat())mats.add(m);}});for(const g of geos)g.dispose();for(const m of mats)m.dispose();guns.removeFromParent();root.userData.aircraftGuns=null;}
   if(!root?.userData.rig?.owned)return;const geos=new Set(),mats=new Set();
   root.traverse(o=>{if(o.isInstancedMesh)o.dispose();if(o.isMesh){geos.add(o.geometry);for(const m of [o.material].flat())mats.add(m);}});for(const g of geos)g.dispose();for(const m of mats)m.dispose();
 }

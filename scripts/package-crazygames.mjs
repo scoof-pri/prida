@@ -51,7 +51,8 @@ export async function buildPortal({full=false,serve=false,root=process.cwd()}={}
   const entries=collectClient(out),report=auditClient(entries),releaseDir=path.join(root,'release');fs.mkdirSync(releaseDir,{recursive:true});
   const filename='PRIDA-CrazyGames-'+(full?'full':'basic')+'.zip';
   fs.writeFileSync(path.join(releaseDir,filename),zipEntries(entries));
-  fs.writeFileSync(path.join(releaseDir,'crazygames-build-audit.json'),JSON.stringify({...report,ads:full?'full-only; approval required':'disabled',progressSave:'CrazyGames SDK Data',sourceBuild:'0.41.0'},null,2));
+  const sourceBuild=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
+  fs.writeFileSync(path.join(releaseDir,'crazygames-build-audit.json'),JSON.stringify({...report,ads:full?'full-only; approval required':'disabled',progressSave:'CrazyGames SDK Data',sourceBuild},null,2));
   if(serve){
     const served=path.join(root,'dist');if(!fs.existsSync(path.join(served,'index.html')))throw Error('Build the standalone client before --serve.');
     fs.copyFileSync(path.join(releaseDir,filename),path.join(served,filename));

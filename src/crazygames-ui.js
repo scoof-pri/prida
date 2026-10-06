@@ -89,7 +89,7 @@ export function mountPortalExportLinks(){
   const box=node('section',null,host);box.id='cg-export035';box.setAttribute('data-developer-only','');
   node('h3','CRAZYGAMES EXPORT',box);
   node('p','Download only after this build is live. Basic Launch has no ads. Full Launch requires platform approval and a separate approved build.',box);
-  for(const [label,name]of [['DOWNLOAD ALL GAME SOURCES + ASSETS','PRIDA-0.38-FULL-GAME.zip'],['DOWNLOAD BASIC BUILD','PRIDA-CrazyGames-basic.zip'],['DOWNLOAD FULL BUILD (IF ENABLED)','PRIDA-CrazyGames-full.zip'],['BUILD AUDIT','crazygames-build-audit.json'],['GAMEPLAY CAPTURE DESK','creator-capture.html']]){
+  for(const [label,name]of [['DOWNLOAD ALL GAME SOURCES + ASSETS','PRIDA-0.42-FULL-GAME.zip'],['DOWNLOAD BASIC BUILD','PRIDA-CrazyGames-basic.zip'],['DOWNLOAD FULL BUILD (IF ENABLED)','PRIDA-CrazyGames-full.zip'],['BUILD AUDIT','crazygames-build-audit.json'],['GAMEPLAY CAPTURE DESK','creator-capture.html']]){
     const a=node('a',label,box);a.href='./'+name;if(!name.endsWith('.html'))a.download=name;else{a.target='_blank';a.rel='noopener';}a.style.display='block';a.style.margin='8px 0';
   }
 }
