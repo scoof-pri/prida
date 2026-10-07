@@ -1,0 +1,30 @@
+name: Locomotion source workspace
+on:
+  push:
+    branches: ['feature/locomotion-repair-043']
+    paths: ['.github/workflows/locomotion-assets.yml']
+permissions:
+  contents: read
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Download author-published CC0 animation library
+        run: |
+          mkdir -p source
+          curl --fail --location --retry 2 --max-time 180 'https://opengameart.org/sites/default/files/universal_animation_librarystandard.zip' -o source/universal-animation-library-standard.zip
+          python3 - <<'PY'
+          import zipfile, hashlib, json
+          from pathlib import Path
+          p=Path('source/universal-animation-library-standard.zip')
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              print('\n'.join(z.namelist()))
+          Path('source/provenance.json').write_text(json.dumps({'author':'Quaternius','license':'CC0-1.0','page':'https://opengameart.org/content/universal-animation-library','sha256':hashlib.sha256(p.read_bytes()).hexdigest()},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prida-locomotion-cc0-source
+          path: source/
+          retention-days: 2
