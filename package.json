@@ -1,6 +1,6 @@
 {
   "name": "prida",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "",
   "main": "index.js",
   "directories": {
@@ -15,6 +15,7 @@
     "build:crazygames": "node scripts/package-crazygames.mjs",
     "build:crazygames:full": "node scripts/package-crazygames.mjs --full",
     "export:full": "node scripts/package-full.mjs",
+    "test:release": "node scripts/check-release-042.mjs",
     "prebuild": "node prida-update.mjs",
     "predev": "node prida-update.mjs",
     "pretest": "node prida-update.mjs",
