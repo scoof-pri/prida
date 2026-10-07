@@ -9,7 +9,7 @@ const installer=fs.existsSync(installerURL)?await import(installerURL):null;
 const payload=installer?.decodePayload?.();
 function read(name){return payload?.get(name)||fs.readFileSync(new URL(name,root));}
 test('build entrypoints use the complete current installer, not obsolete recovery overlays',()=>{
-  assert.equal(pkg.version,'0.42.0');
+  assert.equal(pkg.version,'0.43.0');
   for(const name of ['prebuild','predev','pretest','prestart','prebuild:crazygames','prebuild:crazygames:full']){
     if(pkg.pridaExpandedSource)assert.equal(pkg.scripts[name],undefined);
     else assert.equal(pkg.scripts[name],'node prida-update.mjs');
@@ -28,7 +28,7 @@ test('current source keeps the native lift contract and routes actual avatar/fli
   assert.match(read('src/world.js').toString(),/addBaseDroneStations\(map\)/);
 });
 test('release marker and package match, including the portal upload',()=>{
-  assert.match(read('index.html').toString(),/0\.42\.0 · FPV ITEMS \/ FLIGHT \/ MOTIONS/);
+  assert.match(read('index.html').toString(),/0\.43\.0 · LOCOMOTION \/ RIG FIX/);
   assert.equal(JSON.parse(read('package.json')).version,pkg.version);
 });
 test('model provenance report matches both supplied asset geometries',()=>{
